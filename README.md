@@ -1,4 +1,4 @@
-## LUMPRESS 5.3 | ENTROPY SPECTRUM BENCHMARK (MEDIAN & STEADY-STATE)
+## LUMPRESSION 5.3 | ENTROPY SPECTRUM BENCHMARK (MEDIAN & STEADY-STATE)
 
 | Dataset | Size(MB) | Entropy | Bucket | Lumpi Ratio | Zstd L3 | Weissman | Lumpi (med) | Zstd L3 (med) |
 | --------| -------- | --------| ------ | ----------- | ------- | -------- | ----------- | ------------- |
@@ -8,7 +8,7 @@
 | test_logs.jsonl      |   500.00 |    5.00 | Target Logs   |      21.01x |      10.67x |    1.489 |   3624.62 ms |    491.08 ms |
 
 
-## LUMPRESS 5.4 | ENTROPY SPECTRUM BENCHMARK (MEDIAN & STEADY-STATE)
+## LUMPRESSION 5.4 | ENTROPY SPECTRUM BENCHMARK (MEDIAN & STEADY-STATE)
 
 
 | Dataset | Size(MB) | Entropy | Bucket | Lumpi Ratio | Zstd L3 | Weissman | Lumpi (med) | Zstd L3 (med) |
