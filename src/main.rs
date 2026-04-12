@@ -9,7 +9,7 @@ use flate2::read::GzDecoder;
 use flate2::Compression;
 
 #[derive(Parser)]
-#[command(name = "lumpi", version = "5.3.0", about = "Columnar JSONL Log Storage Engine")]
+#[command(name = "lumpi", version = "5.4.0", about = "Columnar JSONL Log Storage Engine")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -47,10 +47,10 @@ fn calculate_entropy(data: &[u8]) -> f64 {
 }
 
 fn get_entropy_bucket(entropy: f64) -> &'static str {
-    if entropy <= 2.0 { "Highly Struct" }
-    else if entropy <= 5.0 { "Semi-Struct" }
-    else if entropy <= 7.0 { "Natural Txt" }
-    else { "Noise" }
+    if entropy <= 2.0 { "Very Low" }
+    else if entropy <= 5.0 { "Low" }
+    else if entropy <= 7.0 { "Medium" }
+    else { "High (Noise)" }
 }
 
 fn median(mut times: Vec<f64>) -> f64 {
@@ -127,7 +127,7 @@ fn main() {
 
     match &cli.command {
         Commands::Bench { dir } => {
-            println!("\nLUMPRESS 5.3 | FAIR ENTROPY SPECTRUM BENCHMARK (MEDIAN & STEADY-STATE)");
+            println!("\nLUMPRESS 5.4 | ENTROPY SPECTRUM BENCHMARK (MEDIAN & STEADY-STATE)");
             println!("========================================================================================================================================");
             println!("{:<20} | {:<8} | {:<7} | {:<13} | {:<11} | {:<11} | {:<8} | {:<12} | {:<12}", 
                      "Dataset", "Size(MB)", "Entropy", "Bucket", "LUMPI Ratio", "Zstd L3", "Weissman", "Lumpi (med)", "Zstd L3 (med)");
@@ -180,7 +180,7 @@ fn main() {
             println!("========================================================================================================================================\n");
         }
         Commands::Pack { input, output } => {
-            println!("[INFO] LUMPRESS 5.3 | Initializing In-Memory Engine...");
+            println!("[INFO] LUMPRESS 5.4 | Initializing In-Memory Engine...");
             let mut file_content = Vec::new();
             fs::File::open(input).unwrap().read_to_end(&mut file_content).unwrap();
             
@@ -191,7 +191,7 @@ fn main() {
             println!("[INFO] Warming up encoding engines...");
             let iterations = 5;
 
-            let (gz_size, t_gz_pack, gz_bytes) = run_gzip_benchmark_pack(&file_content, iterations);
+            let (gz_size, t_gz_pack, _gz_bytes) = run_gzip_benchmark_pack(&file_content, iterations);
             let gz_ratio = original_size_bytes / gz_size;
 
             let (z1_size, z1_time_pack, _) = run_zstd_benchmark_pack(&file_content, 1, iterations);
@@ -199,7 +199,7 @@ fn main() {
             let (z19_size, z19_time_pack, _) = run_zstd_benchmark_pack(&file_content, 19, 1);
 
             let mut lumpi = engine::LumpiEngine::new();
-            let (comp, final_hash) = lumpi.compress_buffer(&file_content).expect("Fatal: Compression failed");
+            let (comp, _final_hash) = lumpi.compress_buffer(&file_content).expect("Fatal: Compression failed");
             let lumpi_final_size = comp.len() as f64;
             let lumpi_bytes = comp;
 
@@ -217,7 +217,7 @@ fn main() {
             out_file.write_all(&lumpi_bytes).unwrap();
 
             println!("[INFO] Warming up decoding engines...");
-            let t_gz_unpack = run_gzip_benchmark_unpack(&gz_bytes, iterations);
+            let t_gz_unpack = run_gzip_benchmark_unpack(&_gz_bytes, iterations);
             let t_z3_unpack = run_zstd_benchmark_unpack(&z3_bytes, iterations);
 
             let mut unpack_times = Vec::with_capacity(iterations);
