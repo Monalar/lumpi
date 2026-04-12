@@ -69,78 +69,77 @@ impl LumpiEngine {
         let mut cursor = 0;
         let mut is_pure_jsonl = true;
 
-        'parse: {
-            while cursor < len {
-                if let Some(pos) = memchr(b'{', &raw_data[cursor..]) {
-                    for &b in &raw_data[cursor..cursor + pos] {
-                        if !b.is_ascii_whitespace() {
-                            is_pure_jsonl = false; break 'parse;
-                        }
-                    }
-                    cursor += pos + 1;
-                } else {
+        'parse: while cursor < len {
+            let next_brace = match memchr(b'{', &raw_data[cursor..]) {
+                Some(pos) => pos,
+                None => break,
+            };
+
+            for &b in &raw_data[cursor..cursor + next_brace] {
+                if !b.is_ascii_whitespace() {
+                    is_pure_jsonl = false; break 'parse;
+                }
+            }
+            cursor += next_brace + 1;
+
+            let mut field_count = 0;
+
+            loop {
+                while cursor < len && raw_data[cursor].is_ascii_whitespace() { 
+                    cursor += 1; 
+                }
+                if cursor >= len { break; }
+
+                if raw_data[cursor] == b'}' {
+                    cursor += 1;
                     break;
                 }
 
-                let mut field_count = 0;
+                if raw_data[cursor] != b'"' {
+                    is_pure_jsonl = false; break 'parse;
+                }
+                cursor += 1;
 
-                loop {
-                    let mut found_quote = false;
-                    while cursor < len {
-                        let b = raw_data[cursor];
-                        if b == b'"' {
-                            found_quote = true;
-                            break;
-                        } else if b == b'}' {
-                            break;
-                        } else if !b.is_ascii_whitespace() && b != b',' {
-                            is_pure_jsonl = false; break 'parse;
-                        }
-                        cursor += 1;
-                    }
+                let key_start = cursor;
+                let key_len = match memchr(b'"', &raw_data[cursor..]) {
+                    Some(pos) => pos,
+                    None => { is_pure_jsonl = false; break 'parse; }
+                };
+                let key_slice = &raw_data[cursor..cursor + key_len];
+                cursor += key_len + 1;
 
-                    if cursor >= len { break; }
-                    if !found_quote && raw_data[cursor] == b'}' {
-                        cursor += 1;
-                        break;
-                    }
+                if let Some(&id) = self.schema_dict.get(key_slice) {
+                    self.keys_stream.push(id);
+                } else {
+                    let id = self.next_key_id;
+                    self.next_key_id += 1;
+                    self.schema_dict.insert(key_slice.to_vec(), id);
+                    self.keys_stream.push(id);
+                }
+
+                while cursor < len && raw_data[cursor].is_ascii_whitespace() { 
                     cursor += 1; 
-                    
-                    let key_start = cursor;
-                    if let Some(pos) = memchr(b'"', &raw_data[cursor..]) {
-                        let key_slice = &raw_data[cursor..cursor + pos];
-                        cursor += pos + 1;
+                }
+                if cursor >= len || raw_data[cursor] != b':' {
+                    is_pure_jsonl = false; break 'parse;
+                }
+                cursor += 1;
 
-                        let key_id = *self.schema_dict.entry(key_slice.to_vec()).or_insert_with(|| {
-                            let id = self.next_key_id;
-                            self.next_key_id += 1;
-                            id
-                        });
-                        self.keys_stream.push(key_id);
-                    } else {
-                        is_pure_jsonl = false; break 'parse;
-                    }
+                while cursor < len && raw_data[cursor].is_ascii_whitespace() { 
+                    cursor += 1; 
+                }
+                if cursor >= len { is_pure_jsonl = false; break 'parse; }
 
-                    while cursor < len && raw_data[cursor] != b':' {
-                        if !raw_data[cursor].is_ascii_whitespace() {
-                            is_pure_jsonl = false; break 'parse;
-                        }
-                        cursor += 1;
-                    }
-                    if cursor >= len { is_pure_jsonl = false; break 'parse; }
+                let is_string = raw_data[cursor] == b'"';
+                let val_start;
+                let val_end;
+
+                if is_string {
                     cursor += 1;
-                    
-                    while cursor < len && raw_data[cursor].is_ascii_whitespace() { cursor += 1; }
-                    if cursor >= len { is_pure_jsonl = false; break 'parse; }
-
-                    let is_string_type = if raw_data[cursor] == b'"' {
-                        cursor += 1; true
-                    } else { false };
-
-                    let val_start = cursor;
-                    if is_string_type {
-                        loop {
-                            if let Some(pos) = memchr(b'"', &raw_data[cursor..]) {
+                    val_start = cursor;
+                    loop {
+                        match memchr(b'"', &raw_data[cursor..]) {
+                            Some(pos) => {
                                 cursor += pos;
                                 let mut escapes = 0;
                                 let mut check_idx = cursor - 1;
@@ -150,49 +149,58 @@ impl LumpiEngine {
                                     check_idx -= 1;
                                 }
                                 if escapes % 2 == 1 {
-                                    cursor += 1; 
+                                    cursor += 1;
                                 } else {
-                                    break; 
+                                    break;
                                 }
-                            } else {
-                                is_pure_jsonl = false; break 'parse;
-                            }
-                        }
-                    } else {
-                        while cursor < len && raw_data[cursor] != b',' && raw_data[cursor] != b'}' && !raw_data[cursor].is_ascii_whitespace() {
-                            cursor += 1;
+                            },
+                            None => { is_pure_jsonl = false; break 'parse; }
                         }
                     }
-                    
-                    let val_end = cursor;
-                    if is_string_type { cursor += 1; }
-
-                    let val_slice = &raw_data[val_start..val_end];
-                    self.types_stream.push(if is_string_type { 1 } else { 0 });
-
-                    if is_string_type {
-                        let val_id = *self.value_dict.entry(val_slice.to_vec()).or_insert_with(|| {
-                            let id = self.next_val_id;
-                            self.next_val_id += 1;
-                            self.dict_bytes.extend_from_slice(val_slice);
-                            self.dict_lengths.push(val_slice.len() as u32);
-                            id
-                        });
-                        self.string_ids_stream.push(val_id);
-                    } else {
-                        self.raw_numbers_stream.extend_from_slice(val_slice);
-                        self.raw_numbers_lengths.push(val_slice.len() as u8);
+                    val_end = cursor;
+                    cursor += 1;
+                } else {
+                    val_start = cursor;
+                    while cursor < len && raw_data[cursor] != b',' && raw_data[cursor] != b'}' && !raw_data[cursor].is_ascii_whitespace() {
+                        cursor += 1;
                     }
+                    val_end = cursor;
+                }
 
-                    field_count += 1;
+                let val_slice = &raw_data[val_start..val_end];
+                self.types_stream.push(if is_string { 1 } else { 0 });
+
+                if is_string {
+                    if let Some(&id) = self.value_dict.get(val_slice) {
+                        self.string_ids_stream.push(id);
+                    } else {
+                        let id = self.next_val_id;
+                        self.next_val_id += 1;
+                        self.dict_bytes.extend_from_slice(val_slice);
+                        self.dict_lengths.push(val_slice.len() as u32);
+                        self.value_dict.insert(val_slice.to_vec(), id);
+                        self.string_ids_stream.push(id);
+                    }
+                } else {
+                    self.raw_numbers_stream.extend_from_slice(val_slice);
+                    self.raw_numbers_lengths.push(val_slice.len() as u8);
                 }
-                if field_count > 0 {
-                    self.fields_per_row.push(field_count);
+
+                field_count += 1;
+
+                while cursor < len && raw_data[cursor].is_ascii_whitespace() { 
+                    cursor += 1; 
                 }
+                if cursor < len && raw_data[cursor] == b',' {
+                    cursor += 1;
+                }
+            }
+            if field_count > 0 {
+                self.fields_per_row.push(field_count);
             }
         }
 
-        let mut out_buffer = Vec::new();
+        let mut out_buffer = Vec::with_capacity(raw_data.len() / 3);
         let mut encoder = if raw_data.len() < 50 * 1024 * 1024 {
             zstd::stream::Encoder::new(&mut out_buffer, 9)?
         } else {
@@ -209,7 +217,17 @@ impl LumpiEngine {
             return Ok((out_buffer, hash_result));
         }
 
-        let mut block_payload = Vec::new();
+        let mut block_payload = Vec::with_capacity(
+            self.dict_bytes.len() + 
+            self.dict_lengths.len() * 4 + 
+            self.keys_stream.len() * 2 + 
+            self.types_stream.len() + 
+            self.string_ids_stream.len() * 4 + 
+            self.raw_numbers_stream.len() + 
+            self.raw_numbers_lengths.len() + 
+            self.fields_per_row.len() * 2 + 32
+        );
+        
         block_payload.extend_from_slice(&(self.dict_bytes.len() as u32).to_le_bytes());
         block_payload.extend_from_slice(&self.dict_bytes);
         block_payload.extend_from_slice(&(self.dict_lengths.len() as u32).to_le_bytes());
@@ -227,7 +245,7 @@ impl LumpiEngine {
         block_payload.extend_from_slice(&(self.fields_per_row.len() as u32).to_le_bytes());
         for &f in &self.fields_per_row { block_payload.extend_from_slice(&f.to_le_bytes()); }
         
-        let mut schema_bytes = Vec::new();
+        let mut schema_bytes = Vec::with_capacity(self.schema_dict.len() * 32);
         schema_bytes.extend_from_slice(&(self.schema_dict.len() as u32).to_le_bytes());
         for (k, &v) in &self.schema_dict {
             schema_bytes.extend_from_slice(&(k.len() as u32).to_le_bytes());

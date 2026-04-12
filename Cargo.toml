@@ -10,6 +10,7 @@ flate2 = "1.0"
 sha2 = "0.10"
 hex = "0.4"
 memchr = "2.7"
+rayon = "1.8"
 
 [[bin]]
 name = "lumpi"
