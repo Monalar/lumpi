@@ -9,6 +9,7 @@ zstd = { version = "0.13", features = ["zstdmt"] }
 flate2 = "1.0"
 sha2 = "0.10"
 hex = "0.4"
+memchr = "2.7"
 
 [[bin]]
 name = "lumpi"
