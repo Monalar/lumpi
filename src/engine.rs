@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Write, BufWriter};
 use sha2::{Sha256, Digest};
+use memchr::memchr;
 
 pub struct LumpiEngine {
     schema_dict: HashMap<Vec<u8>, u16>,
@@ -70,42 +71,55 @@ impl LumpiEngine {
 
         'parse: {
             while cursor < len {
-                while cursor < len && raw_data[cursor] != b'{' {
-                    if !raw_data[cursor].is_ascii_whitespace() {
-                        is_pure_jsonl = false; break 'parse;
+                if let Some(pos) = memchr(b'{', &raw_data[cursor..]) {
+                    for &b in &raw_data[cursor..cursor + pos] {
+                        if !b.is_ascii_whitespace() {
+                            is_pure_jsonl = false; break 'parse;
+                        }
                     }
-                    cursor += 1;
+                    cursor += pos + 1;
+                } else {
+                    break;
                 }
-                if cursor >= len { break; }
-                cursor += 1;
 
                 let mut field_count = 0;
 
                 loop {
-                    while cursor < len && raw_data[cursor] != b'"' && raw_data[cursor] != b'}' {
-                        if !raw_data[cursor].is_ascii_whitespace() && raw_data[cursor] != b',' {
+                    let mut found_quote = false;
+                    while cursor < len {
+                        let b = raw_data[cursor];
+                        if b == b'"' {
+                            found_quote = true;
+                            break;
+                        } else if b == b'}' {
+                            break;
+                        } else if !b.is_ascii_whitespace() && b != b',' {
                             is_pure_jsonl = false; break 'parse;
                         }
                         cursor += 1;
                     }
+
                     if cursor >= len { break; }
-                    if raw_data[cursor] == b'}' {
+                    if !found_quote && raw_data[cursor] == b'}' {
                         cursor += 1;
                         break;
                     }
                     cursor += 1; 
                     
                     let key_start = cursor;
-                    while cursor < len && raw_data[cursor] != b'"' { cursor += 1; }
-                    if cursor >= len { is_pure_jsonl = false; break 'parse; }
-                    let key_slice = &raw_data[key_start..cursor];
-                    cursor += 1; 
+                    if let Some(pos) = memchr(b'"', &raw_data[cursor..]) {
+                        let key_slice = &raw_data[cursor..cursor + pos];
+                        cursor += pos + 1;
 
-                    let key_id = *self.schema_dict.entry(key_slice.to_vec()).or_insert_with(|| {
-                        let id = self.next_key_id;
-                        self.next_key_id += 1;
-                        id
-                    });
+                        let key_id = *self.schema_dict.entry(key_slice.to_vec()).or_insert_with(|| {
+                            let id = self.next_key_id;
+                            self.next_key_id += 1;
+                            id
+                        });
+                        self.keys_stream.push(key_id);
+                    } else {
+                        is_pure_jsonl = false; break 'parse;
+                    }
 
                     while cursor < len && raw_data[cursor] != b':' {
                         if !raw_data[cursor].is_ascii_whitespace() {
@@ -115,6 +129,7 @@ impl LumpiEngine {
                     }
                     if cursor >= len { is_pure_jsonl = false; break 'parse; }
                     cursor += 1;
+                    
                     while cursor < len && raw_data[cursor].is_ascii_whitespace() { cursor += 1; }
                     if cursor >= len { is_pure_jsonl = false; break 'parse; }
 
@@ -124,25 +139,35 @@ impl LumpiEngine {
 
                     let val_start = cursor;
                     if is_string_type {
-                        while cursor < len && raw_data[cursor] != b'"' {
-                            if raw_data[cursor] == b'\\' && cursor + 1 < len {
-                                cursor += 2;
+                        loop {
+                            if let Some(pos) = memchr(b'"', &raw_data[cursor..]) {
+                                cursor += pos;
+                                let mut escapes = 0;
+                                let mut check_idx = cursor - 1;
+                                while check_idx >= val_start && raw_data[check_idx] == b'\\' {
+                                    escapes += 1;
+                                    if check_idx == 0 { break; }
+                                    check_idx -= 1;
+                                }
+                                if escapes % 2 == 1 {
+                                    cursor += 1; 
+                                } else {
+                                    break; 
+                                }
                             } else {
-                                cursor += 1;
+                                is_pure_jsonl = false; break 'parse;
                             }
                         }
-                        if cursor >= len { is_pure_jsonl = false; break 'parse; }
                     } else {
                         while cursor < len && raw_data[cursor] != b',' && raw_data[cursor] != b'}' && !raw_data[cursor].is_ascii_whitespace() {
                             cursor += 1;
                         }
                     }
+                    
                     let val_end = cursor;
                     if is_string_type { cursor += 1; }
 
                     let val_slice = &raw_data[val_start..val_end];
-                    
-                    self.keys_stream.push(key_id);
                     self.types_stream.push(if is_string_type { 1 } else { 0 });
 
                     if is_string_type {
