@@ -60,7 +60,6 @@ WEISSMAN SCORE (vs Zstd L3): **1.473**
 
 | Dataset | Size(MB) | Entropy | Bucket | Lumpi Ratio | Zstd L3 | Weissman | Lumpi (med) | Zstd L3 (med) |
 | --------| -------- | --------| ------ | ----------- | ------- | -------- | ----------- | ------------- |
-<<<<<<< HEAD
 | 01_random_noise.bin  |    10.00 |    8.00 | High (Noise)         |       1.00x |       1.00x |    0.494 |     24.55 ms |      3.96 ms |
 | 02_real_text.txt     |     4.33 |    4.67 | Low   |      87.50x |      82.12x |    0.274 |     12.74 ms |      0.96 ms |
 | 03_complex_api.jsonl |     6.83 |    5.14 | Medium   |      46.28x |      42.77x |    0.403 |     29.24 ms |      2.56 ms |
