@@ -1,6 +1,6 @@
 [package]
 name = "lumpi_compression"
-version = "2.0.0"
+version = "6.0.0"
 edition = "2021"
 
 [dependencies]
@@ -10,7 +10,14 @@ flate2 = "1.0"
 sha2 = "0.10"
 hex = "0.4"
 memchr = "2.7"
-rayon = "1.8"
+brotli = "7.0"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
 
 [[bin]]
 name = "lumpi"

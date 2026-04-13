@@ -6,3 +6,5 @@ restored.jsonl
 *.jsonl
 *.txt
 *.bin
+*.csv
+*.json
