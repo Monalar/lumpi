@@ -1,11 +1,11 @@
-## LUMPRESS 6.0 | CLI
+## LUMPRESS 6.1 | CLI
 
 ```bash
 lumpi pack data.jsonl
-lumpi pack data.jsonl -o archive.lumpi
+lumpi pack data.jsonl archive.lumpi
 
 lumpi unpack archive.lumpi
-lumpi unpack archive.lumpi -o data.jsonl
+lumpi unpack archive.lumpi data.jsonl
 
 lumpi research data.jsonl
 
@@ -14,7 +14,19 @@ lumpi bench datasets/
 
 Supported formats: JSONL, JSON (arrays), CSV. Unrecognized formats fall back to raw Zstd.
 
-File signature: `LUMP` + 2-byte version (v6.0) at the start of every `.lumpi` file.
+File signature: `LUMP` + 2-byte version at the start of every `.lumpi` file.
+
+
+## LUMPRESS 6.1 | SPECTRUM BENCHMARK
+
+| Dataset | Format | Size(MB) | Entropy | Bucket | LUMPI Ratio | Zstd L3 | Weissman | Lumpi (med) | Zstd L3 (med) |
+| ------- | ------ | -------- | ------- | ------ | ----------- | ------- | -------- | ----------- | ------------- |
+| 01_random_noise.bin  | Raw    |    10.00 |    8.00 | High (Noise)  |       1.00x |       1.00x |    0.583 |     24.56 ms |      5.62 ms |
+| 02_real_text.txt     | Raw    |     4.33 |    4.67 | Low           |      87.49x |      82.12x |    0.268 |     13.36 ms |      0.96 ms |
+| 03_complex_api.jsonl | JSONL  |     6.83 |    5.14 | Medium        |      54.35x |      42.77x |    0.509 |     23.39 ms |      2.59 ms |
+| 05_array.json        | JSON   |     6.70 |    4.35 | Low           |      18.34x |      12.10x |    0.781 |     51.67 ms |      6.70 ms |
+| creditcard.csv       | CSV    |   143.84 |    3.67 | Low           |       2.23x |       2.12x |    0.985 |   1434.93 ms |    884.95 ms |
+| test_logs.jsonl      | JSONL  |   500.00 |    5.00 | Low           |      20.05x |      10.67x |    1.518 |   2179.43 ms |    496.41 ms |
 
 
 ## LUMPRESS 6.0 | ULTIMATE ANALYSIS (500 MB JSONL)

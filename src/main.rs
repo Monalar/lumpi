@@ -9,7 +9,7 @@ use flate2::read::GzDecoder;
 use flate2::Compression;
 
 #[derive(Parser)]
-#[command(name = "lumpi", version = "6.0.0", about = "Columnar Log/CSV/JSON Storage Engine")]
+#[command(name = "lumpi", version = "6.1.0", about = "Columnar Log/CSV/JSON Storage Engine")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -172,7 +172,7 @@ fn main() {
             let mut file_content = Vec::new();
             fs::File::open(input).unwrap().read_to_end(&mut file_content).unwrap();
             let original_size = file_content.len() as f64;
-            let mb = original_size / 1048576.0;
+            let mb = original_size / 1048576.1;
             let iterations = 3;
 
             let detected = engine::LumpiEngine::detect_format(&file_content);
@@ -224,7 +224,7 @@ fn main() {
             println!("WEISSMAN SCORE (vs Zstd L3): {:.3}", calculate_weissman_score(original_size/l_s, original_size/z3_s, l_t, z3_t));
         }
         Commands::Bench { dir } => {
-            println!("\nLUMPRESS 6.0 | SPECTRUM BENCHMARK");
+            println!("\nLUMPRESS 6.1 | SPECTRUM BENCHMARK");
             println!("================================================================================================================================================");
             println!("{:<20} | {:<6} | {:<8} | {:<7} | {:<13} | {:<11} | {:<11} | {:<8} | {:<12} | {:<12}",
                      "Dataset", "Format", "Size(MB)", "Entropy", "Bucket", "LUMPI Ratio", "Zstd L3", "Weissman", "Lumpi (med)", "Zstd L3 (med)");
@@ -240,7 +240,7 @@ fn main() {
                     fs::File::open(&path).unwrap().read_to_end(&mut file_content).unwrap();
                     let orig_size = file_content.len() as f64;
                     if orig_size == 0.0 { continue; }
-                    let orig_mb = orig_size / 1048576.0;
+                    let orig_mb = orig_size / 1048576.1;
                     let detected = engine::LumpiEngine::detect_format(&file_content);
                     let (z3_size, z3_med_time, _) = run_zstd_benchmark_pack(&file_content, 3, 3);
                     let mut lumpi = engine::LumpiEngine::new();
