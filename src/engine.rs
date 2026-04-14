@@ -1,12 +1,12 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::fs::File;
 use std::io::{self, Read, Write, BufWriter};
 use sha2::{Sha256, Digest};
-use memchr::memchr;
+use memchr::{memchr, memchr2, memchr3};
 
 pub const MAGIC: &[u8; 4] = b"LUMP";
 pub const VERSION_MAJOR: u8 = 0x06;
-pub const VERSION_MINOR: u8 = 0x00;
+pub const VERSION_MINOR: u8 = 0x01;
 const HEADER_SIZE: usize = 6;
 
 fn trim_ascii_slice(s: &[u8]) -> &[u8] {
@@ -37,10 +37,10 @@ impl InputFormat {
 }
 
 pub struct LumpiEngine {
-    schema_dict: HashMap<Vec<u8>, u16>,
+    schema_dict: FxHashMap<Vec<u8>, u16>,
     next_key_id: u16,
 
-    value_dict: HashMap<Vec<u8>, u32>,
+    value_dict: FxHashMap<Vec<u8>, u32>,
     next_val_id: u32,
     dict_bytes: Vec<u8>,
     dict_lengths: Vec<u32>,
@@ -68,10 +68,10 @@ enum FsmState {
 impl LumpiEngine {
     pub fn new() -> Self {
         LumpiEngine {
-            schema_dict: HashMap::new(),
+            schema_dict: FxHashMap::default(),
             next_key_id: 0,
 
-            value_dict: HashMap::new(),
+            value_dict: FxHashMap::default(),
             next_val_id: 0,
             dict_bytes: Vec::with_capacity(2 * 1024 * 1024),
             dict_lengths: Vec::with_capacity(50 * 1024),
@@ -151,6 +151,25 @@ impl LumpiEngine {
         }
     }
 
+    fn emit_csv_field(&mut self, field: &[u8], key_id: u16) {
+        self.keys_stream.push(key_id);
+        let trimmed = trim_ascii_slice(field);
+        if trimmed.len() >= 2 && trimmed[0] == b'"' && trimmed[trimmed.len() - 1] == b'"' {
+            let inner = &trimmed[1..trimmed.len() - 1];
+            self.types_stream.push(1);
+            let id = self.intern_string_value(inner);
+            self.string_ids_stream.push(id);
+        } else if !trimmed.is_empty() && trimmed.iter().all(|&b| is_number_byte(b)) {
+            self.types_stream.push(0);
+            self.raw_numbers_stream.extend_from_slice(trimmed);
+            self.raw_numbers_lengths.push(trimmed.len() as u8);
+        } else {
+            self.types_stream.push(1);
+            let id = self.intern_string_value(trimmed);
+            self.string_ids_stream.push(id);
+        }
+    }
+
     fn parse_csv(&mut self, data: &[u8]) -> bool {
         let header_end = match memchr(b'\n', data) {
             Some(pos) => pos,
@@ -164,20 +183,34 @@ impl LumpiEngine {
 
         let mut headers: Vec<&[u8]> = Vec::new();
         let mut col_start = 0;
-        for i in 0..=header_line.len() {
-            if i == header_line.len() || header_line[i] == b',' {
-                let mut col = trim_ascii_slice(&header_line[col_start..i]);
-                if col.len() >= 2 && col[0] == b'"' && col[col.len() - 1] == b'"' {
-                    col = &col[1..col.len() - 1];
+        let mut search_from = 0;
+        loop {
+            match memchr(b',', &header_line[search_from..]) {
+                Some(rel) => {
+                    let i = search_from + rel;
+                    let mut col = trim_ascii_slice(&header_line[col_start..i]);
+                    if col.len() >= 2 && col[0] == b'"' && col[col.len() - 1] == b'"' {
+                        col = &col[1..col.len() - 1];
+                    }
+                    headers.push(col);
+                    col_start = i + 1;
+                    search_from = col_start;
                 }
-                headers.push(col);
-                col_start = i + 1;
+                None => {
+                    let mut col = trim_ascii_slice(&header_line[col_start..]);
+                    if col.len() >= 2 && col[0] == b'"' && col[col.len() - 1] == b'"' {
+                        col = &col[1..col.len() - 1];
+                    }
+                    headers.push(col);
+                    break;
+                }
             }
         }
 
         if headers.is_empty() { return false; }
 
         let key_ids: Vec<u16> = headers.iter().map(|h| self.intern_key(h)).collect();
+        let num_cols = key_ids.len();
 
         let mut cursor = header_end + 1;
         while cursor < data.len() {
@@ -192,35 +225,30 @@ impl LumpiEngine {
             };
             cursor = line_end + 1;
 
-            if line.iter().all(|b| b.is_ascii_whitespace()) { continue; }
+            if line.is_empty() { continue; }
+            let first_significant = memchr3(b',', b'"', b'0', line);
+            if first_significant.is_none() && line.iter().all(|b| b.is_ascii_whitespace()) { continue; }
 
             let mut field_idx: usize = 0;
-            let mut field_start = 0;
+            let mut field_start: usize = 0;
+            let mut search = 0;
 
-            for i in 0..=line.len() {
-                if i == line.len() || line[i] == b',' {
-                    if field_idx >= key_ids.len() { return false; }
-
-                    let field = trim_ascii_slice(&line[field_start..i]);
-                    self.keys_stream.push(key_ids[field_idx]);
-
-                    if field.len() >= 2 && field[0] == b'"' && field[field.len() - 1] == b'"' {
-                        let inner = &field[1..field.len() - 1];
-                        self.types_stream.push(1);
-                        let id = self.intern_string_value(inner);
-                        self.string_ids_stream.push(id);
-                    } else if !field.is_empty() && field.iter().all(|&b| is_number_byte(b)) {
-                        self.types_stream.push(0);
-                        self.raw_numbers_stream.extend_from_slice(field);
-                        self.raw_numbers_lengths.push(field.len() as u8);
-                    } else {
-                        self.types_stream.push(1);
-                        let id = self.intern_string_value(field);
-                        self.string_ids_stream.push(id);
+            loop {
+                match memchr(b',', &line[search..]) {
+                    Some(rel) => {
+                        let i = search + rel;
+                        if field_idx >= num_cols { return false; }
+                        self.emit_csv_field(&line[field_start..i], key_ids[field_idx]);
+                        field_idx += 1;
+                        field_start = i + 1;
+                        search = field_start;
                     }
-
-                    field_idx += 1;
-                    field_start = i + 1;
+                    None => {
+                        if field_idx >= num_cols { return false; }
+                        self.emit_csv_field(&line[field_start..], key_ids[field_idx]);
+                        field_idx += 1;
+                        break;
+                    }
                 }
             }
 
@@ -277,14 +305,24 @@ impl LumpiEngine {
                         }
                     }
                     FsmState::Key => {
-                        while cursor < len && parse_data[cursor].is_ascii_whitespace() { cursor += 1; }
-                        if cursor >= len { break; }
+                        match memchr2(b'"', b'}', &parse_data[cursor..]) {
+                            Some(pos) => { cursor += pos; }
+                            None => { break; }
+                        }
                         if parse_data[cursor] == b'}' {
                             cursor += 1;
-                            state = FsmState::ObjectEnd;
+                            if field_count > 0 {
+                                self.fields_per_row.push(field_count);
+                                field_count = 0;
+                            }
+                            if let Some(pos) = memchr(b'{', &parse_data[cursor..]) {
+                                cursor += pos + 1;
+                                state = FsmState::Key;
+                            } else {
+                                break;
+                            }
                             continue;
                         }
-                        if parse_data[cursor] != b'"' { is_structured = false; break 'parse; }
                         cursor += 1;
 
                         let key_len = match memchr(b'"', &parse_data[cursor..]) {
@@ -299,9 +337,10 @@ impl LumpiEngine {
                         state = FsmState::Colon;
                     }
                     FsmState::Colon => {
-                        while cursor < len && parse_data[cursor].is_ascii_whitespace() { cursor += 1; }
-                        if cursor >= len || parse_data[cursor] != b':' { is_structured = false; break 'parse; }
-                        cursor += 1;
+                        match memchr(b':', &parse_data[cursor..]) {
+                            Some(pos) => { cursor += pos + 1; }
+                            None => { is_structured = false; break 'parse; }
+                        }
 
                         while cursor < len && parse_data[cursor].is_ascii_whitespace() { cursor += 1; }
                         if cursor >= len { is_structured = false; break 'parse; }
@@ -351,18 +390,33 @@ impl LumpiEngine {
                         state = FsmState::Key;
                     }
                     FsmState::ValueNumber => {
-                        while cursor < len && parse_data[cursor] != b',' && parse_data[cursor] != b'}' && !parse_data[cursor].is_ascii_whitespace() {
-                            cursor += 1;
-                        }
-                        let val_slice = &parse_data[val_start..cursor];
-                        self.types_stream.push(0);
-                        self.raw_numbers_stream.extend_from_slice(val_slice);
-                        self.raw_numbers_lengths.push(val_slice.len() as u8);
-                        field_count += 1;
-
-                        while cursor < len && parse_data[cursor].is_ascii_whitespace() { cursor += 1; }
-                        if cursor < len && parse_data[cursor] == b',' {
-                            cursor += 1;
+                        match memchr2(b',', b'}', &parse_data[cursor..]) {
+                            Some(pos) => {
+                                let end = cursor + pos;
+                                let mut trim_end = end;
+                                while trim_end > val_start && parse_data[trim_end - 1].is_ascii_whitespace() {
+                                    trim_end -= 1;
+                                }
+                                let val_slice = &parse_data[val_start..trim_end];
+                                self.types_stream.push(0);
+                                self.raw_numbers_stream.extend_from_slice(val_slice);
+                                self.raw_numbers_lengths.push(val_slice.len() as u8);
+                                field_count += 1;
+                                cursor = end;
+                                if parse_data[cursor] == b',' { cursor += 1; }
+                            }
+                            None => {
+                                let mut trim_end = len;
+                                while trim_end > val_start && parse_data[trim_end - 1].is_ascii_whitespace() {
+                                    trim_end -= 1;
+                                }
+                                let val_slice = &parse_data[val_start..trim_end];
+                                self.types_stream.push(0);
+                                self.raw_numbers_stream.extend_from_slice(val_slice);
+                                self.raw_numbers_lengths.push(val_slice.len() as u8);
+                                field_count += 1;
+                                cursor = len;
+                            }
                         }
                         state = FsmState::Key;
                     }
@@ -375,7 +429,7 @@ impl LumpiEngine {
                 }
             }
 
-            if state == FsmState::ObjectEnd && field_count > 0 {
+            if field_count > 0 && state != FsmState::ObjectStart {
                 self.fields_per_row.push(field_count);
             }
 
