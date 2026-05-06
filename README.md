@@ -1,4 +1,4 @@
-## LUMPRESS 6.1 | CLI
+## LUMPI 6.1 | CLI
 
 ```bash
 lumpi pack data.jsonl
@@ -17,7 +17,7 @@ Supported formats: JSONL, JSON (arrays), CSV. Unrecognized formats fall back to 
 File signature: `LUMP` + 2-byte version at the start of every `.lumpi` file.
 
 
-## LUMPRESS 6.1 | SPECTRUM BENCHMARK
+## LUMPI 6.1 | SPECTRUM BENCHMARK
 
 | Dataset | Format | Size(MB) | Entropy | Bucket | LUMPI Ratio | Zstd L3 | Weissman | Lumpi (med) | Zstd L3 (med) |
 | ------- | ------ | -------- | ------- | ------ | ----------- | ------- | -------- | ----------- | ------------- |
@@ -29,7 +29,7 @@ File signature: `LUMP` + 2-byte version at the start of every `.lumpi` file.
 | test_logs.jsonl      | JSONL  |   500.00 |    5.00 | Low           |      20.05x |      10.67x |    1.518 |   2179.43 ms |    496.41 ms |
 
 
-## LUMPRESS 6.0 | ULTIMATE ANALYSIS (500 MB JSONL)
+## LUMPI 6.0 | ULTIMATE ANALYSIS (500 MB JSONL)
 
 | Algorithm          | Size (KB)    | Ratio    | Pack ms      | MB/s      |
 | ------------------ | ------------ | -------- | ------------ | --------- |
@@ -46,7 +46,7 @@ File signature: `LUMP` + 2-byte version at the start of every `.lumpi` file.
 WEISSMAN SCORE (vs Zstd L3): **1.473**
 
 
-## LUMPRESS 6.0 | SPECTRUM BENCHMARK
+## LUMPI 6.0 | SPECTRUM BENCHMARK
 
 | Dataset | Format | Size(MB) | Entropy | Bucket | LUMPI Ratio | Zstd L3 | Weissman | Lumpi (med) | Zstd L3 (med) |
 | ------- | ------ | -------- | ------- | ------ | ----------- | ------- | -------- | ----------- | ------------- |
@@ -58,7 +58,7 @@ WEISSMAN SCORE (vs Zstd L3): **1.473**
 | test_logs.jsonl      | JSONL  |   500.00 |    5.00 | Low           |      20.05x |      10.67x |    1.518 |   2204.27 ms |    500.38 ms |
 
 
-## LUMPRESSION 5.4 | ENTROPY SPECTRUM BENCHMARK (MEDIAN & STEADY-STATE)
+## LUMPI 5.4 | ENTROPY SPECTRUM BENCHMARK (MEDIAN & STEADY-STATE)
 
 | Dataset | Size(MB) | Entropy | Bucket | Lumpi Ratio | Zstd L3 | Weissman | Lumpi (med) | Zstd L3 (med) |
 | --------| -------- | --------| ------ | ----------- | ------- | -------- | ----------- | ------------- |
@@ -68,7 +68,7 @@ WEISSMAN SCORE (vs Zstd L3): **1.473**
 | test_logs.jsonl      |   500.00 |    5.00 | Target Logs   |      21.01x |      10.67x |    1.488 |   3463.96 ms |    472.06 ms |
 
 
-## LUMPRESSION 5.3 | ENTROPY SPECTRUM BENCHMARK (MEDIAN & STEADY-STATE)
+## LUMPI 5.3 | ENTROPY SPECTRUM BENCHMARK (MEDIAN & STEADY-STATE)
 
 | Dataset | Size(MB) | Entropy | Bucket | Lumpi Ratio | Zstd L3 | Weissman | Lumpi (med) | Zstd L3 (med) |
 | --------| -------- | --------| ------ | ----------- | ------- | -------- | ----------- | ------------- |
