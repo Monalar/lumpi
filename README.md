@@ -1,6 +1,6 @@
 # Lumpi
 
-Compresses structured logs as small as Zstd-19, packs **100× faster**, and greps the archive **3–10× faster** than searching raw text.
+Compresses structured logs as small as Zstd-19, packs **100× faster**, and greps the archive **3–10× faster** than raw text.
 
 ## The problem
 
@@ -43,7 +43,7 @@ cd lumpi_compression
 cargo install --path .
 ```
 
-Requires Rust 1.75+. No runtime dependencies.
+Requires Rust stable. No runtime dependencies.
 
 ## Usage
 
@@ -79,4 +79,4 @@ Nested JSON (GitHub Archive, API dumps) falls back to raw Zstd automatically.
 bash bench.sh
 ```
 
-Generates three datasets locally via `python3` and runs `lumpi bench` on them. No downloads required.
+Requires `python3` and `lumpi` in PATH. Generates three datasets locally and runs `lumpi bench` on them. No downloads required.
