@@ -32,13 +32,13 @@ The last row is the skeptic's test: `requestID` is a UUID field that exceeds the
 ## Install
 
 ```bash
-cargo install --git https://github.com/Akillot/lumpi_compression
+cargo install --git https://github.com/Monalar/lumpi
 ```
 
 Or from source:
 
 ```bash
-git clone https://github.com/Akillot/lumpi_compression
+git clone https://github.com/Monalar/lumpi
 cd lumpi_compression
 cargo install --path .
 ```
