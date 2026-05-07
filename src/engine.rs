@@ -1,7 +1,27 @@
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use sha2::{Sha256, Digest};
 use memchr::{memchr, memchr2};
+
+pub const MAGIC: &[u8; 4] = b"LUMP";
+pub const VERSION_MAJOR: u8 = 0x09;
+pub const VERSION_MINOR: u8 = 0x00;
+const HEADER_SIZE: usize = 6;
+const ROWS_PER_FRAME: usize = 65536;
+
+const TYPE_VARINT: u8 = 0;
+const TYPE_STRING: u8 = 1;
+const TYPE_LITERAL: u8 = 2;
+const TYPE_STRING_LIT: u8 = 3;
+
+const CARD_SAMPLES: u32 = 100;
+const CARD_THRESH: f32 = 0.5;
+
+fn sha256_hex(data: &[u8]) -> String {
+    let mut h = Sha256::new();
+    h.update(data);
+    hex::encode(h.finalize())
+}
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() { return Some(0); }
@@ -25,19 +45,6 @@ fn raw_line_matches(line: &[u8], key: &[u8], value: &[u8]) -> bool {
             rest.get(value.len()).map_or(true, |&b| !b.is_ascii_alphanumeric() && b != b'.' && b != b'-')
     }
 }
-
-pub const MAGIC: &[u8; 4] = b"LUMP";
-pub const VERSION_MAJOR: u8 = 0x08;
-pub const VERSION_MINOR: u8 = 0x00;
-const HEADER_SIZE: usize = 6;
-
-const TYPE_VARINT: u8 = 0;
-const TYPE_STRING: u8 = 1;
-const TYPE_LITERAL: u8 = 2;
-const TYPE_STRING_LIT: u8 = 3;
-
-const CARD_SAMPLES: u32 = 100;
-const CARD_THRESH: f32 = 0.5;
 
 fn trim_ascii_slice(s: &[u8]) -> &[u8] {
     let start = s.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(s.len());
@@ -71,9 +78,40 @@ fn decode_zigzag_varint(data: &[u8], cursor: &mut usize) -> i64 {
     ((z >> 1) as i64) ^ -((z & 1) as i64)
 }
 
+fn skip_varint(data: &[u8], cursor: &mut usize) {
+    while data[*cursor] >= 0x80 { *cursor += 1; }
+    *cursor += 1;
+}
+
 #[inline]
 fn push_u32(v: u32, buf: &mut Vec<u8>) {
     buf.extend_from_slice(&v.to_le_bytes());
+}
+
+#[inline]
+fn read_u32(p: &[u8], c: &mut usize) -> u32 {
+    let v = u32::from_le_bytes([p[*c], p[*c+1], p[*c+2], p[*c+3]]);
+    *c += 4; v
+}
+
+#[inline]
+fn read_u16_at(p: &[u8], off: usize) -> u16 {
+    u16::from_le_bytes([p[off], p[off+1]])
+}
+
+#[inline]
+fn read_u32_at(p: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes([p[off], p[off+1], p[off+2], p[off+3]])
+}
+
+fn compress_block(data: &[u8]) -> io::Result<Vec<u8>> {
+    let threads = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4);
+    let mut buf = Vec::new();
+    let mut enc = zstd::stream::Encoder::new(&mut buf, 9)?;
+    enc.multithread(threads)?;
+    enc.write_all(data)?;
+    enc.finish()?;
+    Ok(buf)
 }
 
 #[derive(PartialEq)]
@@ -112,13 +150,7 @@ pub struct LumpiEngine {
 }
 
 #[derive(PartialEq)]
-enum FsmState {
-    ObjectStart,
-    Key,
-    Colon,
-    ValueString,
-    ValueNumber,
-}
+enum FsmState { ObjectStart, Key, Colon, ValueString, ValueNumber }
 
 impl LumpiEngine {
     pub fn new() -> Self {
@@ -142,26 +174,17 @@ impl LumpiEngine {
     }
 
     pub fn clear(&mut self) {
-        self.schema_dict.clear();
-        self.next_key_id = 0;
-        self.value_dict.clear();
-        self.next_val_id = 0;
-        self.dict_bytes.clear();
-        self.dict_lengths.clear();
-        self.keys_stream.clear();
-        self.types_stream.clear();
-        self.string_ids_stream.clear();
-        self.varint_stream.clear();
-        self.literal_stream.clear();
-        self.literal_lengths.clear();
+        self.schema_dict.clear(); self.next_key_id = 0;
+        self.value_dict.clear(); self.next_val_id = 0;
+        self.dict_bytes.clear(); self.dict_lengths.clear();
+        self.keys_stream.clear(); self.types_stream.clear();
+        self.string_ids_stream.clear(); self.varint_stream.clear();
+        self.literal_stream.clear(); self.literal_lengths.clear();
         self.fields_per_row.clear();
-        self.key_str_seen.clear();
-        self.high_card_keys.clear();
+        self.key_str_seen.clear(); self.high_card_keys.clear();
     }
 
-    pub fn was_structured(&self) -> bool {
-        !self.keys_stream.is_empty()
-    }
+    pub fn was_structured(&self) -> bool { !self.keys_stream.is_empty() }
 
     pub fn detect_format(data: &[u8]) -> InputFormat {
         let mut i = 0;
@@ -237,8 +260,7 @@ impl LumpiEngine {
         self.keys_stream.push(key_id);
         let trimmed = trim_ascii_slice(field);
         if trimmed.len() >= 2 && trimmed[0] == b'"' && trimmed[trimmed.len() - 1] == b'"' {
-            let inner = &trimmed[1..trimmed.len() - 1];
-            self.emit_string_value(key_id, inner);
+            self.emit_string_value(key_id, &trimmed[1..trimmed.len() - 1]);
         } else if !trimmed.is_empty() && trimmed.iter().all(|&b| is_number_byte(b)) {
             self.emit_number_value(trimmed);
         } else {
@@ -247,14 +269,8 @@ impl LumpiEngine {
     }
 
     fn parse_csv(&mut self, data: &[u8]) -> bool {
-        let header_end = match memchr(b'\n', data) {
-            Some(pos) => pos,
-            None => return false,
-        };
-        let header_line = {
-            let h = &data[..header_end];
-            if h.last() == Some(&b'\r') { &h[..h.len() - 1] } else { h }
-        };
+        let header_end = match memchr(b'\n', data) { Some(p) => p, None => return false };
+        let header_line = { let h = &data[..header_end]; if h.last() == Some(&b'\r') { &h[..h.len()-1] } else { h } };
         let mut headers: Vec<&[u8]> = Vec::new();
         let mut col_start = 0;
         let mut search_from = 0;
@@ -263,20 +279,13 @@ impl LumpiEngine {
                 Some(rel) => {
                     let i = search_from + rel;
                     let mut col = trim_ascii_slice(&header_line[col_start..i]);
-                    if col.len() >= 2 && col[0] == b'"' && col[col.len() - 1] == b'"' {
-                        col = &col[1..col.len() - 1];
-                    }
-                    headers.push(col);
-                    col_start = i + 1;
-                    search_from = col_start;
+                    if col.len() >= 2 && col[0] == b'"' && col[col.len()-1] == b'"' { col = &col[1..col.len()-1]; }
+                    headers.push(col); col_start = i + 1; search_from = col_start;
                 }
                 None => {
                     let mut col = trim_ascii_slice(&header_line[col_start..]);
-                    if col.len() >= 2 && col[0] == b'"' && col[col.len() - 1] == b'"' {
-                        col = &col[1..col.len() - 1];
-                    }
-                    headers.push(col);
-                    break;
+                    if col.len() >= 2 && col[0] == b'"' && col[col.len()-1] == b'"' { col = &col[1..col.len()-1]; }
+                    headers.push(col); break;
                 }
             }
         }
@@ -285,14 +294,8 @@ impl LumpiEngine {
         let num_cols = key_ids.len();
         let mut cursor = header_end + 1;
         while cursor < data.len() {
-            let line_end = match memchr(b'\n', &data[cursor..]) {
-                Some(pos) => cursor + pos,
-                None => data.len(),
-            };
-            let line = {
-                let l = &data[cursor..line_end];
-                if l.last() == Some(&b'\r') { &l[..l.len() - 1] } else { l }
-            };
+            let line_end = memchr(b'\n', &data[cursor..]).map_or(data.len(), |p| cursor + p);
+            let line = { let l = &data[cursor..line_end]; if l.last() == Some(&b'\r') { &l[..l.len()-1] } else { l } };
             cursor = line_end + 1;
             if line.is_empty() || line.iter().all(|b| b.is_ascii_whitespace()) { continue; }
             let mut field_idx = 0usize;
@@ -304,15 +307,12 @@ impl LumpiEngine {
                         let i = search + rel;
                         if field_idx >= num_cols { return false; }
                         self.emit_csv_field(&line[field_start..i], key_ids[field_idx]);
-                        field_idx += 1;
-                        field_start = i + 1;
-                        search = field_start;
+                        field_idx += 1; field_start = i + 1; search = field_start;
                     }
                     None => {
                         if field_idx >= num_cols { return false; }
                         self.emit_csv_field(&line[field_start..], key_ids[field_idx]);
-                        field_idx += 1;
-                        break;
+                        field_idx += 1; break;
                     }
                 }
             }
@@ -323,19 +323,11 @@ impl LumpiEngine {
 
     pub fn compress_buffer(&mut self, raw_data: &[u8]) -> io::Result<(Vec<u8>, String)> {
         let format = Self::detect_format(raw_data);
-        let parse_data = if format == InputFormat::JsonArray {
-            Self::strip_json_array(raw_data)
-        } else {
-            raw_data
-        };
-
+        let parse_data = if format == InputFormat::JsonArray { Self::strip_json_array(raw_data) } else { raw_data };
         let mut is_structured = true;
 
         if format == InputFormat::Csv {
-            if !self.parse_csv(parse_data) {
-                self.clear();
-                is_structured = false;
-            }
+            if !self.parse_csv(parse_data) { self.clear(); is_structured = false; }
         } else {
             let len = parse_data.len();
             let mut cursor = 0;
@@ -350,14 +342,9 @@ impl LumpiEngine {
                         match memchr(b'{', &parse_data[cursor..]) {
                             Some(pos) => {
                                 for &b in &parse_data[cursor..cursor + pos] {
-                                    if !b.is_ascii_whitespace() && b != b',' {
-                                        is_structured = false;
-                                        break 'parse;
-                                    }
+                                    if !b.is_ascii_whitespace() && b != b',' { is_structured = false; break 'parse; }
                                 }
-                                cursor += pos + 1;
-                                field_count = 0;
-                                state = FsmState::Key;
+                                cursor += pos + 1; field_count = 0; state = FsmState::Key;
                             }
                             None => break,
                         }
@@ -369,10 +356,7 @@ impl LumpiEngine {
                         }
                         if parse_data[cursor] == b'}' {
                             cursor += 1;
-                            if field_count > 0 {
-                                self.fields_per_row.push(field_count);
-                                field_count = 0;
-                            }
+                            if field_count > 0 { self.fields_per_row.push(field_count); field_count = 0; }
                             match memchr(b'{', &parse_data[cursor..]) {
                                 Some(pos) => { cursor += pos + 1; state = FsmState::Key; }
                                 None => break,
@@ -451,86 +435,121 @@ impl LumpiEngine {
                     }
                 }
             }
-
-            if field_count > 0 && state != FsmState::ObjectStart {
-                self.fields_per_row.push(field_count);
-            }
+            if field_count > 0 && state != FsmState::ObjectStart { self.fields_per_row.push(field_count); }
             if self.keys_stream.is_empty() { is_structured = false; }
         }
 
         if !is_structured { self.clear(); }
 
-        let (hash_result, uncompressed_payload) = if !is_structured {
-            let mut hasher = Sha256::new();
-            hasher.update(raw_data);
-            let hash = hex::encode(hasher.finalize());
-            let mut p = Vec::with_capacity(raw_data.len() + 68);
-            p.extend_from_slice(hash.as_bytes());
-            p.extend_from_slice(&0xFFFFFFFF_u32.to_le_bytes());
-            p.extend_from_slice(raw_data);
-            (hash, p)
-        } else {
-            let mut bp = Vec::with_capacity(
-                self.dict_bytes.len() + self.dict_lengths.len() * 4 +
-                self.keys_stream.len() * 2 + self.types_stream.len() +
-                self.string_ids_stream.len() * 4 + self.varint_stream.len() +
-                self.literal_stream.len() + self.literal_lengths.len() +
-                self.fields_per_row.len() * 2 + 64
-            );
-            push_u32(self.dict_bytes.len() as u32, &mut bp);
-            bp.extend_from_slice(&self.dict_bytes);
-            push_u32(self.dict_lengths.len() as u32, &mut bp);
-            for &l in &self.dict_lengths { push_u32(l, &mut bp); }
-            push_u32(self.keys_stream.len() as u32, &mut bp);
-            for &k in &self.keys_stream { bp.extend_from_slice(&k.to_le_bytes()); }
-            push_u32(self.types_stream.len() as u32, &mut bp);
-            bp.extend_from_slice(&self.types_stream);
-            push_u32(self.string_ids_stream.len() as u32, &mut bp);
-            for &v in &self.string_ids_stream { push_u32(v, &mut bp); }
-            push_u32(self.varint_stream.len() as u32, &mut bp);
-            bp.extend_from_slice(&self.varint_stream);
-            push_u32(self.literal_stream.len() as u32, &mut bp);
-            bp.extend_from_slice(&self.literal_stream);
-            push_u32(self.literal_lengths.len() as u32, &mut bp);
-            for &l in &self.literal_lengths { bp.extend_from_slice(&l.to_le_bytes()); }
-            push_u32(self.fields_per_row.len() as u32, &mut bp);
-            for &f in &self.fields_per_row { bp.extend_from_slice(&f.to_le_bytes()); }
-
-            let mut hasher = Sha256::new();
-            hasher.update(&bp);
-            let hash = hex::encode(hasher.finalize());
-
-            let mut sb = Vec::with_capacity(self.schema_dict.len() * 32);
-            push_u32(self.schema_dict.len() as u32, &mut sb);
-            let mut sorted: Vec<(&Vec<u8>, &u16)> = self.schema_dict.iter().collect();
-            sorted.sort_by_key(|&(_, &id)| id);
-            for (k, &v) in sorted {
-                push_u32(k.len() as u32, &mut sb);
-                sb.extend_from_slice(k);
-                sb.extend_from_slice(&v.to_le_bytes());
-            }
-
-            let mut p = Vec::with_capacity(64 + 4 + sb.len() + bp.len());
-            p.extend_from_slice(hash.as_bytes());
-            push_u32(sb.len() as u32, &mut p);
-            p.extend_from_slice(&sb);
-            p.extend_from_slice(&bp);
-            (hash, p)
-        };
-
-        let mut zstd_buf = Vec::with_capacity(uncompressed_payload.len() / 3);
-        let mut encoder = zstd::stream::Encoder::new(&mut zstd_buf, 9)?;
-        let threads = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4);
-        encoder.multithread(threads)?;
-        encoder.write_all(&uncompressed_payload)?;
-        encoder.finish()?;
-
-        let mut out = Vec::with_capacity(HEADER_SIZE + zstd_buf.len());
+        let mut out = Vec::new();
         out.extend_from_slice(MAGIC);
         out.push(VERSION_MAJOR);
         out.push(VERSION_MINOR);
-        out.extend_from_slice(&zstd_buf);
-        Ok((out, hash_result))
+
+        if !is_structured {
+            let hash = sha256_hex(raw_data);
+            let raw_zstd = compress_block(raw_data)?;
+            push_u32(0xFFFFFFFF, &mut out);
+            out.extend_from_slice(hash.as_bytes());
+            out.extend_from_slice(&raw_zstd);
+            return Ok((out, hash));
+        }
+
+        let mut schema_raw = Vec::new();
+        push_u32(self.schema_dict.len() as u32, &mut schema_raw);
+        let mut sorted: Vec<_> = self.schema_dict.iter().collect();
+        sorted.sort_by_key(|&(_, &id)| id);
+        for (k, &v) in &sorted {
+            push_u32(k.len() as u32, &mut schema_raw);
+            schema_raw.extend_from_slice(k);
+            schema_raw.extend_from_slice(&v.to_le_bytes());
+        }
+        let schema_zstd = zstd::encode_all(schema_raw.as_slice(), 9)?;
+
+        let mut dict_raw = Vec::new();
+        push_u32(self.dict_bytes.len() as u32, &mut dict_raw);
+        dict_raw.extend_from_slice(&self.dict_bytes);
+        push_u32(self.dict_lengths.len() as u32, &mut dict_raw);
+        for &l in &self.dict_lengths { push_u32(l, &mut dict_raw); }
+        let dict_zstd = zstd::encode_all(dict_raw.as_slice(), 9)?;
+
+        push_u32(schema_zstd.len() as u32, &mut out);
+        out.extend_from_slice(&schema_zstd);
+        push_u32(dict_zstd.len() as u32, &mut out);
+        out.extend_from_slice(&dict_zstd);
+
+        let num_rows = self.fields_per_row.len();
+        let frame_count = (num_rows + ROWS_PER_FRAME - 1).max(1) / ROWS_PER_FRAME;
+        push_u32(frame_count as u32, &mut out);
+
+        let mut key_idx = 0usize;
+        let mut sid_idx = 0usize;
+        let mut vc = 0usize;
+        let mut lc = 0usize;
+        let mut llc = 0usize;
+        let mut row_idx = 0;
+
+        while row_idx < num_rows {
+            let frame_end = (row_idx + ROWS_PER_FRAME).min(num_rows);
+            let row_count = frame_end - row_idx;
+
+            let key_start = key_idx;
+            let sid_start = sid_idx;
+            let vc_start = vc;
+            let lc_start = lc;
+            let llc_start = llc;
+
+            for r in row_idx..frame_end {
+                let nf = self.fields_per_row[r] as usize;
+                for _ in 0..nf {
+                    match self.types_stream[key_idx] {
+                        TYPE_STRING => { sid_idx += 1; }
+                        TYPE_VARINT => { skip_varint(&self.varint_stream, &mut vc); }
+                        TYPE_LITERAL | TYPE_STRING_LIT => {
+                            lc += self.literal_lengths[llc] as usize;
+                            llc += 1;
+                        }
+                        _ => {}
+                    }
+                    key_idx += 1;
+                }
+            }
+
+            let total_fields = key_idx - key_start;
+            let string_count = sid_idx - sid_start;
+
+            let mut scan_raw = Vec::with_capacity(8 + total_fields * 3 + string_count * 4 + row_count * 2);
+            push_u32(total_fields as u32, &mut scan_raw);
+            push_u32(string_count as u32, &mut scan_raw);
+            for &k in &self.keys_stream[key_start..key_idx] { scan_raw.extend_from_slice(&k.to_le_bytes()); }
+            scan_raw.extend_from_slice(&self.types_stream[key_start..key_idx]);
+            for &s in &self.string_ids_stream[sid_start..sid_idx] { push_u32(s, &mut scan_raw); }
+            for &f in &self.fields_per_row[row_idx..frame_end] { scan_raw.extend_from_slice(&f.to_le_bytes()); }
+
+            let mut data_raw = Vec::new();
+            let frame_varints = &self.varint_stream[vc_start..vc];
+            let frame_lit_lens = &self.literal_lengths[llc_start..llc];
+            let frame_literals = &self.literal_stream[lc_start..lc];
+            push_u32(frame_varints.len() as u32, &mut data_raw);
+            data_raw.extend_from_slice(frame_varints);
+            push_u32(frame_lit_lens.len() as u32, &mut data_raw);
+            for &l in frame_lit_lens { data_raw.extend_from_slice(&l.to_le_bytes()); }
+            push_u32(frame_literals.len() as u32, &mut data_raw);
+            data_raw.extend_from_slice(frame_literals);
+
+            let scan_zstd = zstd::encode_all(scan_raw.as_slice(), 9)?;
+            let data_zstd = compress_block(&data_raw)?;
+
+            push_u32(row_count as u32, &mut out);
+            push_u32(scan_zstd.len() as u32, &mut out);
+            out.extend_from_slice(&scan_zstd);
+            push_u32(data_zstd.len() as u32, &mut out);
+            out.extend_from_slice(&data_zstd);
+
+            row_idx = frame_end;
+        }
+
+        Ok((out, String::new()))
     }
 
     pub fn decompress_buffer(payload: &[u8]) -> io::Result<Vec<u8>> {
@@ -545,161 +564,120 @@ impl LumpiEngine {
                 format!("unsupported version {}.{}, need {}.x", payload[4], payload[5], VERSION_MAJOR)));
         }
 
-        let mut decoder = zstd::stream::Decoder::new(&payload[HEADER_SIZE..])?;
+        let mut cur = HEADER_SIZE;
+        let first = read_u32(payload, &mut cur);
 
-        let mut stored_hash_bytes = [0u8; 64];
-        decoder.read_exact(&mut stored_hash_bytes)?;
-        let stored_hash = std::str::from_utf8(&stored_hash_bytes)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid hash bytes"))?
-            .to_owned();
-
-        let mut flag = [0u8; 4];
-        decoder.read_exact(&mut flag)?;
-        let schema_len = u32::from_le_bytes(flag);
-
-        if schema_len == 0xFFFFFFFF {
-            let mut raw_out = Vec::new();
-            decoder.read_to_end(&mut raw_out)?;
-            let mut h = Sha256::new();
-            h.update(&raw_out);
-            if hex::encode(h.finalize()) != stored_hash {
+        if first == 0xFFFFFFFF {
+            let stored_hash = std::str::from_utf8(&payload[cur..cur + 64])
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid hash"))?
+                .to_owned();
+            cur += 64;
+            let raw_out = zstd::decode_all(&payload[cur..])?;
+            if sha256_hex(&raw_out) != stored_hash {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "integrity check failed"));
             }
             return Ok(raw_out);
         }
 
-        let mut schema_bytes = vec![0u8; schema_len as usize];
-        decoder.read_exact(&mut schema_bytes)?;
-
-        let mut bp = Vec::new();
-        decoder.read_to_end(&mut bp)?;
-
-        let mut h = Sha256::new();
-        h.update(&bp);
-        if hex::encode(h.finalize()) != stored_hash {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "integrity check failed"));
-        }
-
-        let r32 = |p: &[u8], c: &mut usize| -> u32 {
-            let v = u32::from_le_bytes([p[*c], p[*c+1], p[*c+2], p[*c+3]]);
-            *c += 4; v
-        };
+        let schema_size = first as usize;
+        let schema_raw = zstd::decode_all(&payload[cur..cur + schema_size])?;
+        cur += schema_size;
 
         let mut sc = 0usize;
-        let num_keys = r32(&schema_bytes, &mut sc);
-        let mut id_to_key: Vec<Vec<u8>> = vec![Vec::new(); num_keys as usize];
+        let num_keys = read_u32(&schema_raw, &mut sc) as usize;
+        let mut id_to_key: Vec<Vec<u8>> = vec![Vec::new(); num_keys];
         for _ in 0..num_keys {
-            let kl = r32(&schema_bytes, &mut sc) as usize;
-            let kb = schema_bytes[sc..sc + kl].to_vec();
-            sc += kl;
-            let kid = u16::from_le_bytes([schema_bytes[sc], schema_bytes[sc + 1]]);
-            sc += 2;
-            id_to_key[kid as usize] = kb;
+            let kl = read_u32(&schema_raw, &mut sc) as usize;
+            let kb = schema_raw[sc..sc + kl].to_vec(); sc += kl;
+            let kid = read_u16_at(&schema_raw, sc) as usize; sc += 2;
+            id_to_key[kid] = kb;
         }
 
-        let mut c = 0usize;
-        let dict_bytes_len = r32(&bp, &mut c) as usize;
-        let dict_bytes_slice = &bp[c..c + dict_bytes_len];
-        c += dict_bytes_len;
+        let dict_size = read_u32(payload, &mut cur) as usize;
+        let dict_raw = zstd::decode_all(&payload[cur..cur + dict_size])?;
+        cur += dict_size;
 
-        let dl_len = r32(&bp, &mut c) as usize;
-        let mut dict_lengths: Vec<u32> = Vec::with_capacity(dl_len);
-        for _ in 0..dl_len { dict_lengths.push(r32(&bp, &mut c)); }
-
-        let mut dict_lookups: Vec<&[u8]> = Vec::with_capacity(dl_len);
         let mut dc = 0usize;
-        for &l in &dict_lengths {
-            let ln = l as usize;
-            dict_lookups.push(&dict_bytes_slice[dc..dc + ln]);
-            dc += ln;
+        let db_len = read_u32(&dict_raw, &mut dc) as usize;
+        let dict_bytes_data = dict_raw[dc..dc + db_len].to_vec(); dc += db_len;
+        let dl_count = read_u32(&dict_raw, &mut dc) as usize;
+        let mut dict_lookups: Vec<&[u8]> = Vec::with_capacity(dl_count);
+        let mut dbc = 0usize;
+        for _ in 0..dl_count {
+            let l = read_u32(&dict_raw, &mut dc) as usize;
+            dict_lookups.push(&dict_bytes_data[dbc..dbc + l]);
+            dbc += l;
         }
 
-        let keys_len = r32(&bp, &mut c) as usize;
-        let mut keys_stream: Vec<u16> = Vec::with_capacity(keys_len);
-        for _ in 0..keys_len {
-            keys_stream.push(u16::from_le_bytes([bp[c], bp[c + 1]]));
-            c += 2;
-        }
+        let frame_count = read_u32(payload, &mut cur) as usize;
+        let mut out = Vec::new();
 
-        let types_len = r32(&bp, &mut c) as usize;
-        let types_stream = &bp[c..c + types_len];
-        c += types_len;
+        for _ in 0..frame_count {
+            let row_count = read_u32(payload, &mut cur) as usize;
+            let scan_size = read_u32(payload, &mut cur) as usize;
+            let scan_raw = zstd::decode_all(&payload[cur..cur + scan_size])?;
+            cur += scan_size;
+            let data_size = read_u32(payload, &mut cur) as usize;
+            let data_raw = zstd::decode_all(&payload[cur..cur + data_size])?;
+            cur += data_size;
 
-        let sids_len = r32(&bp, &mut c) as usize;
-        let mut string_ids: Vec<u32> = Vec::with_capacity(sids_len);
-        for _ in 0..sids_len { string_ids.push(r32(&bp, &mut c)); }
+            let (_total_fields, _string_count, key_ids_off, types_off, sids_off, fpr_off) =
+                parse_scan_offsets(&scan_raw);
 
-        let varint_len = r32(&bp, &mut c) as usize;
-        let varint_stream = &bp[c..c + varint_len];
-        c += varint_len;
+            let mut dc2 = 0usize;
+            let varint_len = read_u32(&data_raw, &mut dc2) as usize;
+            let varint_off = dc2; dc2 += varint_len;
+            let lit_count = read_u32(&data_raw, &mut dc2) as usize;
+            let lit_lens_off = dc2; dc2 += lit_count * 2;
+            let _lit_bytes_len = read_u32(&data_raw, &mut dc2) as usize;
+            let lits_off = dc2;
 
-        let lit_len = r32(&bp, &mut c) as usize;
-        let literal_stream = &bp[c..c + lit_len];
-        c += lit_len;
+            let mut kc = 0usize;
+            let mut sc3 = 0usize;
+            let mut vc = varint_off;
+            let mut llc = 0usize;
+            let mut lc = lits_off;
 
-        let ll_count = r32(&bp, &mut c) as usize;
-        let mut literal_lengths: Vec<u16> = Vec::with_capacity(ll_count);
-        for _ in 0..ll_count {
-            literal_lengths.push(u16::from_le_bytes([bp[c], bp[c + 1]]));
-            c += 2;
-        }
-
-        let rows_len = r32(&bp, &mut c) as usize;
-        let mut fields_per_row: Vec<u16> = Vec::with_capacity(rows_len);
-        for _ in 0..rows_len {
-            fields_per_row.push(u16::from_le_bytes([bp[c], bp[c + 1]]));
-            c += 2;
-        }
-
-        let mut out = Vec::with_capacity(bp.len() * 8);
-        let mut kc = 0usize;
-        let mut sc2 = 0usize;
-        let mut vc = 0usize;
-        let mut lc = 0usize;
-        let mut llc = 0usize;
-
-        for &num_fields in &fields_per_row {
-            out.push(b'{');
-            for i in 0..num_fields {
-                if i > 0 { out.extend_from_slice(b", "); }
-                let key_id = keys_stream[kc] as usize;
-                out.push(b'"');
-                out.extend_from_slice(&id_to_key[key_id]);
-                out.extend_from_slice(b"\": ");
-                match types_stream[kc] {
-                    TYPE_STRING => {
-                        let vid = string_ids[sc2] as usize;
-                        out.push(b'"');
-                        out.extend_from_slice(dict_lookups[vid]);
-                        out.push(b'"');
-                        sc2 += 1;
+            for r in 0..row_count {
+                let nf = read_u16_at(&scan_raw, fpr_off + r * 2) as usize;
+                out.push(b'{');
+                for i in 0..nf {
+                    if i > 0 { out.extend_from_slice(b", "); }
+                    let kid = read_u16_at(&scan_raw, key_ids_off + kc * 2) as usize;
+                    let typ = scan_raw[types_off + kc];
+                    out.push(b'"');
+                    out.extend_from_slice(&id_to_key[kid]);
+                    out.extend_from_slice(b"\": ");
+                    match typ {
+                        TYPE_STRING => {
+                            let vid = read_u32_at(&scan_raw, sids_off + sc3 * 4) as usize;
+                            out.push(b'"');
+                            out.extend_from_slice(dict_lookups[vid]);
+                            out.push(b'"');
+                            sc3 += 1;
+                        }
+                        TYPE_VARINT => {
+                            let n = decode_zigzag_varint(&data_raw, &mut vc);
+                            out.extend_from_slice(n.to_string().as_bytes());
+                        }
+                        TYPE_LITERAL => {
+                            let ln = read_u16_at(&data_raw, lit_lens_off + llc * 2) as usize;
+                            out.extend_from_slice(&data_raw[lc..lc + ln]);
+                            lc += ln; llc += 1;
+                        }
+                        TYPE_STRING_LIT => {
+                            let ln = read_u16_at(&data_raw, lit_lens_off + llc * 2) as usize;
+                            out.push(b'"');
+                            out.extend_from_slice(&data_raw[lc..lc + ln]);
+                            out.push(b'"');
+                            lc += ln; llc += 1;
+                        }
+                        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "unknown type byte")),
                     }
-                    TYPE_VARINT => {
-                        let n = decode_zigzag_varint(varint_stream, &mut vc);
-                        let s = n.to_string();
-                        out.extend_from_slice(s.as_bytes());
-                    }
-                    TYPE_LITERAL => {
-                        let ln = literal_lengths[llc] as usize;
-                        out.extend_from_slice(&literal_stream[lc..lc + ln]);
-                        lc += ln;
-                        llc += 1;
-                    }
-                    TYPE_STRING_LIT => {
-                        let ln = literal_lengths[llc] as usize;
-                        out.push(b'"');
-                        out.extend_from_slice(&literal_stream[lc..lc + ln]);
-                        out.push(b'"');
-                        lc += ln;
-                        llc += 1;
-                    }
-                    _ => {
-                        return Err(io::Error::new(io::ErrorKind::InvalidData, "unknown type byte"));
-                    }
+                    kc += 1;
                 }
-                kc += 1;
+                out.extend_from_slice(b"}\n");
             }
-            out.extend_from_slice(b"}\n");
         }
 
         Ok(out)
@@ -717,188 +695,197 @@ impl LumpiEngine {
                 format!("unsupported version {}.{}, need {}.x", payload[4], payload[5], VERSION_MAJOR)));
         }
 
-        let mut decoder = zstd::stream::Decoder::new(&payload[HEADER_SIZE..])?;
-        let mut stored_hash_bytes = [0u8; 64];
-        decoder.read_exact(&mut stored_hash_bytes)?;
-        let stored_hash = std::str::from_utf8(&stored_hash_bytes)
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid hash bytes"))?
-            .to_owned();
-        let mut flag = [0u8; 4];
-        decoder.read_exact(&mut flag)?;
-        let schema_len = u32::from_le_bytes(flag);
+        let mut cur = HEADER_SIZE;
+        let first = read_u32(payload, &mut cur);
 
-        if schema_len == 0xFFFFFFFF {
-            let mut raw_out = Vec::new();
-            decoder.read_to_end(&mut raw_out)?;
-            let mut h = Sha256::new();
-            h.update(&raw_out);
-            if hex::encode(h.finalize()) != stored_hash {
+        if first == 0xFFFFFFFF {
+            let stored_hash = std::str::from_utf8(&payload[cur..cur + 64])
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid hash"))?
+                .to_owned();
+            cur += 64;
+            let raw_out = zstd::decode_all(&payload[cur..])?;
+            if sha256_hex(&raw_out) != stored_hash {
                 return Err(io::Error::new(io::ErrorKind::InvalidData, "integrity check failed"));
             }
             let mut matches = Vec::new();
             for line in raw_out.split(|&b| b == b'\n') {
                 if line.is_empty() { continue; }
                 if raw_line_matches(line, key, value) {
-                    let mut m = line.to_vec();
-                    m.push(b'\n');
+                    let mut m = line.to_vec(); m.push(b'\n');
                     matches.push(m);
                 }
             }
             return Ok(matches);
         }
 
-        let mut schema_bytes = vec![0u8; schema_len as usize];
-        decoder.read_exact(&mut schema_bytes)?;
-        let mut bp = Vec::new();
-        decoder.read_to_end(&mut bp)?;
-
-        let mut h = Sha256::new();
-        h.update(&bp);
-        if hex::encode(h.finalize()) != stored_hash {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "integrity check failed"));
-        }
-
-        let r32 = |p: &[u8], c: &mut usize| -> u32 {
-            let v = u32::from_le_bytes([p[*c], p[*c+1], p[*c+2], p[*c+3]]);
-            *c += 4; v
-        };
+        let schema_size = first as usize;
+        let schema_raw = zstd::decode_all(&payload[cur..cur + schema_size])?;
+        cur += schema_size;
 
         let mut sc = 0usize;
-        let num_keys = r32(&schema_bytes, &mut sc);
-        let mut id_to_key: Vec<Vec<u8>> = vec![Vec::new(); num_keys as usize];
+        let num_keys = read_u32(&schema_raw, &mut sc) as usize;
+        let mut id_to_key: Vec<Vec<u8>> = vec![Vec::new(); num_keys];
         let mut target_key_id: Option<u16> = None;
         for _ in 0..num_keys {
-            let kl = r32(&schema_bytes, &mut sc) as usize;
-            let kb = schema_bytes[sc..sc + kl].to_vec();
-            sc += kl;
-            let kid = u16::from_le_bytes([schema_bytes[sc], schema_bytes[sc + 1]]);
-            sc += 2;
+            let kl = read_u32(&schema_raw, &mut sc) as usize;
+            let kb = schema_raw[sc..sc + kl].to_vec(); sc += kl;
+            let kid = read_u16_at(&schema_raw, sc); sc += 2;
             if kb.as_slice() == key { target_key_id = Some(kid); }
             id_to_key[kid as usize] = kb;
         }
-
         let Some(target_key_id) = target_key_id else { return Ok(Vec::new()); };
 
-        let mut c = 0usize;
-        let dict_bytes_len = r32(&bp, &mut c) as usize;
-        let dict_bytes_slice = &bp[c..c + dict_bytes_len];
-        c += dict_bytes_len;
-        let dl_len = r32(&bp, &mut c) as usize;
-        let mut dict_lengths: Vec<u32> = Vec::with_capacity(dl_len);
-        for _ in 0..dl_len { dict_lengths.push(r32(&bp, &mut c)); }
-        let mut dict_lookups: Vec<&[u8]> = Vec::with_capacity(dl_len);
-        let mut dc = 0usize;
-        for &l in &dict_lengths {
-            let ln = l as usize;
-            dict_lookups.push(&dict_bytes_slice[dc..dc + ln]);
-            dc += ln;
-        }
+        let dict_size = read_u32(payload, &mut cur) as usize;
+        let dict_raw = zstd::decode_all(&payload[cur..cur + dict_size])?;
+        cur += dict_size;
 
-        let keys_len = r32(&bp, &mut c) as usize;
-        let mut keys_stream: Vec<u16> = Vec::with_capacity(keys_len);
-        for _ in 0..keys_len {
-            keys_stream.push(u16::from_le_bytes([bp[c], bp[c + 1]]));
-            c += 2;
-        }
-        let types_len = r32(&bp, &mut c) as usize;
-        let types_stream = &bp[c..c + types_len];
-        c += types_len;
-        let sids_len = r32(&bp, &mut c) as usize;
-        let mut string_ids: Vec<u32> = Vec::with_capacity(sids_len);
-        for _ in 0..sids_len { string_ids.push(r32(&bp, &mut c)); }
-        let varint_len = r32(&bp, &mut c) as usize;
-        let varint_stream = &bp[c..c + varint_len];
-        c += varint_len;
-        let lit_len = r32(&bp, &mut c) as usize;
-        let literal_stream = &bp[c..c + lit_len];
-        c += lit_len;
-        let ll_count = r32(&bp, &mut c) as usize;
-        let mut literal_lengths: Vec<u16> = Vec::with_capacity(ll_count);
-        for _ in 0..ll_count {
-            literal_lengths.push(u16::from_le_bytes([bp[c], bp[c + 1]]));
-            c += 2;
-        }
-        let rows_len = r32(&bp, &mut c) as usize;
-        let mut fields_per_row: Vec<u16> = Vec::with_capacity(rows_len);
-        for _ in 0..rows_len {
-            fields_per_row.push(u16::from_le_bytes([bp[c], bp[c + 1]]));
-            c += 2;
+        let mut dc = 0usize;
+        let db_len = read_u32(&dict_raw, &mut dc) as usize;
+        let dict_bytes_data = dict_raw[dc..dc + db_len].to_vec(); dc += db_len;
+        let dl_count = read_u32(&dict_raw, &mut dc) as usize;
+        let mut dict_lookups: Vec<&[u8]> = Vec::with_capacity(dl_count);
+        let mut dbc = 0usize;
+        for _ in 0..dl_count {
+            let l = read_u32(&dict_raw, &mut dc) as usize;
+            dict_lookups.push(&dict_bytes_data[dbc..dbc + l]);
+            dbc += l;
         }
 
         let target_int: Option<i64> = std::str::from_utf8(value).ok().and_then(|s| s.parse().ok());
+        let target_dict_id: Option<u32> = dict_lookups.iter().position(|&s| s == value).map(|i| i as u32);
 
+        let frame_count = read_u32(payload, &mut cur) as usize;
         let mut matches = Vec::new();
         let mut row_buf: Vec<u8> = Vec::new();
-        let mut kc = 0usize;
-        let mut sc2 = 0usize;
-        let mut vc = 0usize;
-        let mut lc = 0usize;
-        let mut llc = 0usize;
 
-        for &num_fields in &fields_per_row {
-            row_buf.clear();
-            let mut matched = false;
-            row_buf.push(b'{');
-            for i in 0..num_fields {
-                if i > 0 { row_buf.extend_from_slice(b", "); }
-                let key_id = keys_stream[kc];
-                let typ = types_stream[kc];
-                kc += 1;
-                row_buf.push(b'"');
-                row_buf.extend_from_slice(&id_to_key[key_id as usize]);
-                row_buf.extend_from_slice(b"\": ");
-                match typ {
-                    TYPE_STRING => {
-                        let vid = string_ids[sc2] as usize;
-                        sc2 += 1;
-                        if key_id == target_key_id && dict_lookups[vid] == value {
-                            matched = true;
-                        }
-                        row_buf.push(b'"');
-                        row_buf.extend_from_slice(dict_lookups[vid]);
-                        row_buf.push(b'"');
-                    }
-                    TYPE_VARINT => {
-                        let n = decode_zigzag_varint(varint_stream, &mut vc);
-                        if key_id == target_key_id {
-                            if let Some(ti) = target_int {
-                                if n == ti { matched = true; }
-                            }
-                        }
-                        let s = n.to_string();
-                        row_buf.extend_from_slice(s.as_bytes());
-                    }
-                    TYPE_LITERAL => {
-                        let ln = literal_lengths[llc] as usize;
-                        let lit = &literal_stream[lc..lc + ln];
-                        if key_id == target_key_id && lit == value {
-                            matched = true;
-                        }
-                        row_buf.extend_from_slice(lit);
-                        lc += ln;
-                        llc += 1;
-                    }
-                    TYPE_STRING_LIT => {
-                        let ln = literal_lengths[llc] as usize;
-                        let lit = &literal_stream[lc..lc + ln];
-                        if key_id == target_key_id && lit == value {
-                            matched = true;
-                        }
-                        row_buf.push(b'"');
-                        row_buf.extend_from_slice(lit);
-                        row_buf.push(b'"');
-                        lc += ln;
-                        llc += 1;
-                    }
-                    _ => {
-                        return Err(io::Error::new(io::ErrorKind::InvalidData, "unknown type byte"));
-                    }
+        for _ in 0..frame_count {
+            let row_count = read_u32(payload, &mut cur) as usize;
+            let scan_size = read_u32(payload, &mut cur) as usize;
+            let scan_raw = zstd::decode_all(&payload[cur..cur + scan_size])?;
+            cur += scan_size;
+            let data_size = read_u32(payload, &mut cur) as usize;
+
+            let (total_fields, _string_count, key_ids_off, types_off, sids_off, fpr_off) =
+                parse_scan_offsets(&scan_raw);
+
+            let frame_has_key = (0..total_fields).any(|i| {
+                read_u16_at(&scan_raw, key_ids_off + i * 2) == target_key_id
+            });
+            if !frame_has_key {
+                cur += data_size;
+                continue;
+            }
+
+            if let Some(tdid) = target_dict_id {
+                let has_match = frame_has_string_match(
+                    &scan_raw, total_fields, key_ids_off, types_off, sids_off, target_key_id, tdid);
+                if !has_match {
+                    cur += data_size;
+                    continue;
                 }
             }
-            row_buf.extend_from_slice(b"}\n");
-            if matched { matches.push(row_buf.clone()); }
+
+            let data_raw = zstd::decode_all(&payload[cur..cur + data_size])?;
+            cur += data_size;
+
+            let mut dc2 = 0usize;
+            let varint_len = read_u32(&data_raw, &mut dc2) as usize;
+            let varint_off = dc2; dc2 += varint_len;
+            let lit_count = read_u32(&data_raw, &mut dc2) as usize;
+            let lit_lens_off = dc2; dc2 += lit_count * 2;
+            let _lit_bytes_len = read_u32(&data_raw, &mut dc2) as usize;
+            let lits_off = dc2;
+
+            let mut kc = 0usize;
+            let mut sc3 = 0usize;
+            let mut vc = varint_off;
+            let mut llc = 0usize;
+            let mut lc = lits_off;
+
+            for r in 0..row_count {
+                let nf = read_u16_at(&scan_raw, fpr_off + r * 2) as usize;
+                row_buf.clear();
+                let mut matched = false;
+                row_buf.push(b'{');
+                for i in 0..nf {
+                    if i > 0 { row_buf.extend_from_slice(b", "); }
+                    let kid = read_u16_at(&scan_raw, key_ids_off + kc * 2);
+                    let typ = scan_raw[types_off + kc];
+                    row_buf.push(b'"');
+                    row_buf.extend_from_slice(&id_to_key[kid as usize]);
+                    row_buf.extend_from_slice(b"\": ");
+                    match typ {
+                        TYPE_STRING => {
+                            let vid = read_u32_at(&scan_raw, sids_off + sc3 * 4);
+                            if kid == target_key_id {
+                                if let Some(tdid) = target_dict_id { if vid == tdid { matched = true; } }
+                            }
+                            row_buf.push(b'"');
+                            row_buf.extend_from_slice(dict_lookups[vid as usize]);
+                            row_buf.push(b'"');
+                            sc3 += 1;
+                        }
+                        TYPE_VARINT => {
+                            let n = decode_zigzag_varint(&data_raw, &mut vc);
+                            if kid == target_key_id {
+                                if let Some(ti) = target_int { if n == ti { matched = true; } }
+                            }
+                            row_buf.extend_from_slice(n.to_string().as_bytes());
+                        }
+                        TYPE_LITERAL => {
+                            let ln = read_u16_at(&data_raw, lit_lens_off + llc * 2) as usize;
+                            let lit = &data_raw[lc..lc + ln];
+                            if kid == target_key_id && lit == value { matched = true; }
+                            row_buf.extend_from_slice(lit);
+                            lc += ln; llc += 1;
+                        }
+                        TYPE_STRING_LIT => {
+                            let ln = read_u16_at(&data_raw, lit_lens_off + llc * 2) as usize;
+                            let lit = &data_raw[lc..lc + ln];
+                            if kid == target_key_id && lit == value { matched = true; }
+                            row_buf.push(b'"');
+                            row_buf.extend_from_slice(lit);
+                            row_buf.push(b'"');
+                            lc += ln; llc += 1;
+                        }
+                        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "unknown type byte")),
+                    }
+                    kc += 1;
+                }
+                row_buf.extend_from_slice(b"}\n");
+                if matched { matches.push(row_buf.clone()); }
+            }
         }
 
         Ok(matches)
     }
+}
+
+fn parse_scan_offsets(scan_raw: &[u8]) -> (usize, usize, usize, usize, usize, usize) {
+    let total_fields = u32::from_le_bytes([scan_raw[0], scan_raw[1], scan_raw[2], scan_raw[3]]) as usize;
+    let string_count = u32::from_le_bytes([scan_raw[4], scan_raw[5], scan_raw[6], scan_raw[7]]) as usize;
+    let key_ids_off = 8;
+    let types_off = key_ids_off + total_fields * 2;
+    let sids_off = types_off + total_fields;
+    let fpr_off = sids_off + string_count * 4;
+    (total_fields, string_count, key_ids_off, types_off, sids_off, fpr_off)
+}
+
+fn frame_has_string_match(
+    scan_raw: &[u8], total_fields: usize,
+    key_ids_off: usize, types_off: usize, sids_off: usize,
+    target_key_id: u16, target_dict_id: u32,
+) -> bool {
+    let mut sc3 = 0usize;
+    for i in 0..total_fields {
+        let kid = read_u16_at(scan_raw, key_ids_off + i * 2);
+        let typ = scan_raw[types_off + i];
+        if typ == TYPE_STRING {
+            if kid == target_key_id && read_u32_at(scan_raw, sids_off + sc3 * 4) == target_dict_id {
+                return true;
+            }
+            sc3 += 1;
+        }
+    }
+    false
 }

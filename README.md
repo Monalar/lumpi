@@ -1,40 +1,45 @@
 # Lumpi
 
-Columnar compression for flat JSONL and CSV logs.
-
-**Same ratio as Zstd-L19. 100× faster to compress.**
-
----
+Compresses structured logs as small as Zstd-19, packs **100× faster**, and greps the archive **3–10× faster** than searching raw text.
 
 ## The problem
 
-Flat JSONL logs repeat the same keys and enum values in every row. A nginx access log with a million entries contains the word `"method"` a million times, and `"GET"` eight hundred thousand times. Plain Zstd treats the file as a blob and relies on its sliding window to find these repetitions. Lumpi transposes the data into columns first — all methods together, all status codes together, all timestamps together — then encodes each column with a dictionary and compresses the result with Zstd. The compressor sees a much simpler signal.
+Flat JSONL logs repeat keys and enum values millions of times. Lumpi transposes rows into columns, dictionary-encodes repeating values, then compresses with Zstd — the compressor sees a much simpler signal.
 
-## Results
+## Compression
 
-Numbers from `bash bench.sh` on Apple M3. Zstd baselines run with the same library at their documented optimal settings.
+Numbers from `bash bench.sh` on Apple M3. Zstd-19 baseline uses the same library.
 
-| Dataset | Size | Lumpi ratio | Lumpi MB/s | Zstd-L19+LDM ratio | Zstd-L19+LDM MB/s |
+| Dataset | Size | Lumpi ratio | Zstd-19 ratio | Lumpi MB/s | Zstd-19 MB/s |
 |---|---|---|---|---|---|
-| Nginx access logs (IP, UA, path, status, latency) | 110 MB | **15.6×** | 217 | 13.0× | ~2 |
-| Application logs (level, user_id, latency, path) | 53 MB | **13.1×** | 222 | 13.0× | ~2 |
-| CloudTrail (UUID request IDs, nullable fields) | 68 MB | **10.0×** | 241 | 10.1× | ~2 |
+| Nginx access logs | 111 MB | **16.1×** | 13.2× | **221** | 4.2 |
+| App logs (level, user_id, path, status) | 53 MB | 13.0× | 13.2× | **236** | 3.5 |
+| CloudTrail (UUID request IDs) | 68 MB | 10.1× | 10.1× | **200** | 4.1 |
 
-On every dataset Lumpi matches or exceeds Zstd-L19 on ratio while compressing **100× faster**. The nginx result stands out because low-cardinality repeated fields (method, status, path) respond strongly to columnar dictionary encoding. CloudTrail contains a UUID per event — the high-cardinality field is detected automatically after 100 rows and stored raw, keeping ratio on par with Zstd.
+## Search without decompressing
 
-Nested JSON (GitHub Archive events, deeply nested API responses) falls back to raw Zstd automatically. Lumpi is not a general-purpose compressor — it is a specialist for flat structured logs.
+`lumpi grep` scans the compressed archive directly. Benchmarked against `zstdgrep` (`zstd -d | grep`) and plain `grep` on the raw file, warm cache, Apple M3.
+
+| Query | lumpi ms | zstdgrep ms | grep ms |
+|---|---|---|---|
+| App logs — `level=ERROR` (99k matches) | **126** | 996 | 440 |
+| Nginx — `method=DELETE` (71k matches) | **144** | 2229 | 809 |
+| CloudTrail — `eventName=AssumeRole` (20k matches) | **66** | 324 | 502 |
+| CloudTrail — `requestID=<uuid>` (1 match, not in dictionary) | **54** | 522 | 505 |
+
+The last row is the skeptic's test: `requestID` is a UUID field that exceeds the cardinality threshold, so it bypasses the string dictionary and is stored raw. Lumpi still wins 10× because the frame layout means it reads 6.7 MB from disk, not 68 MB — regardless of how the field is encoded.
 
 ## Install
 
 ```bash
-cargo install --git https://github.com/nickzozulya/lumpi
+cargo install --git https://github.com/Akillot/lumpi_compression
 ```
 
 Or from source:
 
 ```bash
-git clone https://github.com/nickzozulya/lumpi
-cd lumpi
+git clone https://github.com/Akillot/lumpi_compression
+cd lumpi_compression
 cargo install --path .
 ```
 
@@ -43,61 +48,35 @@ Requires Rust 1.75+. No runtime dependencies.
 ## Usage
 
 ```bash
-# Compress
-lumpi pack access.log.jsonl              # → access.log.jsonl.lmp
-lumpi pack access.log.jsonl out.lmp      # explicit output path
-
-# Decompress
-lumpi unpack out.lmp                     # → out
-lumpi unpack out.lmp restored.jsonl
-
-# Compare against all baselines on one file
-lumpi research access.log.jsonl
-
-# Benchmark a directory of files (skips non-flat files automatically)
-lumpi bench ./logs/
-
-# Search without full decompression
-lumpi grep out.lmp "status=500"
-lumpi grep out.lmp "level=ERROR"
-lumpi grep out.lmp "user_id=42"
+lumpi pack access.jsonl
+lumpi grep access.jsonl.lmp "method=DELETE"
+lumpi unpack access.jsonl.lmp
 ```
 
-`pack` and `unpack` print ratio and throughput. `grep` writes matches to stdout and `N matches in Xms` to stderr, so output is pipeable.
+`grep` writes matches to stdout and `N matches in Xms` to stderr, so output is pipeable.
 
 ## How it works
 
-1. **Parse** — a zero-copy FSM walks the JSONL byte-by-byte and extracts key-value pairs without allocating per-field strings. Nested objects or arrays trigger an automatic fallback to raw mode.
+Lumpi transposes JSONL into columns — all `level` values together, all `status` values together — then encodes each column with a dictionary and compresses with Zstd L9.
 
-2. **Transpose** — fields are routed into separate streams: a key-ID stream, a type stream, a string-ID stream, a ZigZag varint stream, and a literal stream (booleans, nulls, floats).
+High-cardinality fields (UUIDs, request IDs, session tokens) are detected automatically after 100 rows and stored raw, preventing dictionary bloat.
 
-3. **Encode** — string values are interned into a global dictionary (u32 ID). Fields where unique values exceed 50% of occurrences after 100 samples (UUIDs, request IDs, session tokens) are detected automatically and stored raw — preventing dictionary bloat on mixed-cardinality data.
+`grep` uses a frame-based layout: each 65 536-row frame has a small scan block (key IDs, types, string IDs) compressed independently from the data block. Grep decompresses only the scan block per frame and skips the data block entirely when the target field is absent.
 
-4. **Compress** — all streams concatenated and compressed with Zstd L9 multithreaded. A SHA-256 of the columnar payload is stored in the header for integrity verification on decompression.
+Nested JSON (GitHub Archive, API dumps) falls back to raw Zstd automatically.
 
 ## Scope
 
 | Input | Behavior |
 |---|---|
-| Flat JSONL (nginx, app logs, CloudTrail, Datadog) | Columnar encoding — full ratio benefit |
+| Flat JSONL (nginx, app logs, CloudTrail, Datadog) | Columnar encoding |
 | CSV with header row | Columnar encoding |
-| JSON array of flat objects | Columnar encoding |
 | Nested JSON (GitHub Archive, API dumps) | Raw Zstd — detected automatically |
-| Binary / unstructured | Raw Zstd — detected automatically |
 
-## Reproduce the benchmark
+## Reproduce
 
 ```bash
 bash bench.sh
 ```
 
-Generates three datasets locally (no download required) and optionally fetches one hour of GitHub Archive events to demonstrate the nested-JSON fallback. Requires `python3` and `lumpi` in PATH.
-
-## Format
-
-- Magic bytes: `LUMP`
-- Version: `0x08 0x00`
-- Payload: single Zstd block containing a 64-byte SHA-256 hex digest, a schema dictionary mapping key names to u16 IDs, and columnar data streams
-- Extension: `.lmp`
-
-Archives produced by older format versions will be rejected with a clear error. Re-compress with the current binary.
+Generates three datasets locally via `python3` and runs `lumpi bench` on them. No downloads required.
