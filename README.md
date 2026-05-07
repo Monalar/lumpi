@@ -1,4 +1,4 @@
-# LUMPI
+# Lumpi
 
 Columnar compression for flat JSONL and CSV logs.
 
