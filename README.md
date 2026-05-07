@@ -39,7 +39,7 @@ Or from source:
 
 ```bash
 git clone https://github.com/Monalar/lumpi
-cd lumpi_compression
+cd lumpi
 cargo install --path .
 ```
 
