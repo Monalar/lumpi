@@ -225,6 +225,12 @@ impl LumpiEngine {
 
     fn emit_string_value(&mut self, key_id: u16, val: &[u8]) {
         if self.high_card_keys.contains(&key_id) {
+            if val.len() > u16::MAX as usize {
+                self.types_stream.push(TYPE_LITERAL);
+                self.literal_stream.extend_from_slice(b"<value_too_large>");
+                self.literal_lengths.push(17u16);
+                return;
+            }
             self.types_stream.push(TYPE_STRING_LIT);
             self.literal_stream.extend_from_slice(val);
             self.literal_lengths.push(val.len() as u16);
@@ -250,8 +256,13 @@ impl LumpiEngine {
             }
             None => {
                 self.types_stream.push(TYPE_LITERAL);
-                self.literal_stream.extend_from_slice(bytes);
-                self.literal_lengths.push(bytes.len() as u16);
+                if bytes.len() > u16::MAX as usize {
+                    self.literal_stream.extend_from_slice(b"<value_too_large>");
+                    self.literal_lengths.push(17u16);
+                } else {
+                    self.literal_stream.extend_from_slice(bytes);
+                    self.literal_lengths.push(bytes.len() as u16);
+                }
             }
         }
     }

@@ -110,6 +110,72 @@ echo "  COMPRESSION BENCHMARK"
 echo "$SEP"
 lumpi bench "$BENCH_DIR"
 
+# --- Grep benchmark ---
+echo ""
+echo "$SEP"
+echo "  GREP BENCHMARK  (lumpi vs zstdgrep vs plain grep)"
+echo "$SEP"
+echo "Packing and compressing datasets for grep test..."
+
+lumpi pack "$BENCH_DIR/app_logs.jsonl"      "$BENCH_DIR/app_logs.lmp"
+lumpi pack "$BENCH_DIR/nginx_logs.jsonl"    "$BENCH_DIR/nginx_logs.lmp"
+lumpi pack "$BENCH_DIR/cloudtrail_logs.jsonl" "$BENCH_DIR/cloudtrail_logs.lmp"
+
+zstd -19 -q "$BENCH_DIR/app_logs.jsonl"       -o "$BENCH_DIR/app_logs.jsonl.zst"
+zstd -19 -q "$BENCH_DIR/nginx_logs.jsonl"     -o "$BENCH_DIR/nginx_logs.jsonl.zst"
+zstd -19 -q "$BENCH_DIR/cloudtrail_logs.jsonl" -o "$BENCH_DIR/cloudtrail_logs.jsonl.zst"
+
+CT_UUID=$(python3 -c "
+import json
+with open('$BENCH_DIR/cloudtrail_logs.jsonl') as f:
+    for i, line in enumerate(f):
+        if i == 12345:
+            print(json.loads(line)['requestID'])
+            break
+")
+
+python3 - "$BENCH_DIR" "$CT_UUID" <<'PY'
+import subprocess, time, sys, os
+
+bench_dir = sys.argv[1]
+ct_uuid   = sys.argv[2]
+
+LUMPI = "lumpi"
+
+def ms(cmd, n=3):
+    times = []
+    for _ in range(n):
+        t0 = time.perf_counter()
+        subprocess.run(cmd, capture_output=True)
+        times.append((time.perf_counter() - t0) * 1000)
+    times.sort()
+    return times[1]
+
+def zstdgrep_cmd(zst, pattern):
+    return ["sh", "-c", f"zstd -d -c {zst} | grep {repr(pattern)}"]
+
+rows = [
+    ("App logs",    "level=ERROR",        '"level": "ERROR"',
+     f"{bench_dir}/app_logs.lmp", f"{bench_dir}/app_logs.jsonl.zst", f"{bench_dir}/app_logs.jsonl"),
+    ("Nginx",       "method=DELETE",      '"method": "DELETE"',
+     f"{bench_dir}/nginx_logs.lmp", f"{bench_dir}/nginx_logs.jsonl.zst", f"{bench_dir}/nginx_logs.jsonl"),
+    ("CloudTrail",  "eventName=CreateRole", "CreateRole",
+     f"{bench_dir}/cloudtrail_logs.lmp", f"{bench_dir}/cloudtrail_logs.jsonl.zst", f"{bench_dir}/cloudtrail_logs.jsonl"),
+    ("CloudTrail UUID", f"requestID={ct_uuid}", ct_uuid,
+     f"{bench_dir}/cloudtrail_logs.lmp", f"{bench_dir}/cloudtrail_logs.jsonl.zst", f"{bench_dir}/cloudtrail_logs.jsonl"),
+]
+
+print(f"\n{'Query':<30} | {'matches':>8} | {'lumpi ms':>9} | {'zstdgrep ms':>11} | {'grep ms':>8}")
+print("-" * 80)
+for label, lp, gp, lmp, zst, jsonl in rows:
+    r = subprocess.run([LUMPI, "grep", lmp, lp], capture_output=True)
+    matches = r.stderr.decode().split()[0]
+    lms  = ms([LUMPI, "grep", lmp, lp])
+    zms  = ms(zstdgrep_cmd(zst, gp))
+    gms  = ms(["grep", gp, jsonl])
+    print(f"{label + ' — ' + lp:<30} | {matches:>8} | {lms:>9.0f} | {zms:>11.0f} | {gms:>8.0f}")
+PY
+
 # --- Optional: GitHub Archive (nested JSON, raw fallback demo) ---
 echo ""
 echo "$SEP"
