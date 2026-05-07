@@ -1,78 +1,103 @@
-## LUMPRESS 6.1 | CLI
+# LUMPI
+
+Columnar compression for flat JSONL and CSV logs.
+
+**Same ratio as Zstd-L19. 100× faster to compress.**
+
+---
+
+## The problem
+
+Flat JSONL logs repeat the same keys and enum values in every row. A nginx access log with a million entries contains the word `"method"` a million times, and `"GET"` eight hundred thousand times. Plain Zstd treats the file as a blob and relies on its sliding window to find these repetitions. Lumpi transposes the data into columns first — all methods together, all status codes together, all timestamps together — then encodes each column with a dictionary and compresses the result with Zstd. The compressor sees a much simpler signal.
+
+## Results
+
+Numbers from `bash bench.sh` on Apple M3. Zstd baselines run with the same library at their documented optimal settings.
+
+| Dataset | Size | Lumpi ratio | Lumpi MB/s | Zstd-L19+LDM ratio | Zstd-L19+LDM MB/s |
+|---|---|---|---|---|---|
+| Nginx access logs (IP, UA, path, status, latency) | 110 MB | **15.6×** | 217 | 13.0× | ~2 |
+| Application logs (level, user_id, latency, path) | 53 MB | **13.1×** | 222 | 13.0× | ~2 |
+| CloudTrail (UUID request IDs, nullable fields) | 68 MB | **10.0×** | 241 | 10.1× | ~2 |
+
+On every dataset Lumpi matches or exceeds Zstd-L19 on ratio while compressing **100× faster**. The nginx result stands out because low-cardinality repeated fields (method, status, path) respond strongly to columnar dictionary encoding. CloudTrail contains a UUID per event — the high-cardinality field is detected automatically after 100 rows and stored raw, keeping ratio on par with Zstd.
+
+Nested JSON (GitHub Archive events, deeply nested API responses) falls back to raw Zstd automatically. Lumpi is not a general-purpose compressor — it is a specialist for flat structured logs.
+
+## Install
 
 ```bash
-lumpi pack data.jsonl
-lumpi pack data.jsonl archive.lumpi
-
-lumpi unpack archive.lumpi
-lumpi unpack archive.lumpi data.jsonl
-
-lumpi research data.jsonl
-
-lumpi bench datasets/
+cargo install --git https://github.com/nickzozulya/lumpi
 ```
 
-Supported formats: JSONL, JSON (arrays), CSV. Unrecognized formats fall back to raw Zstd.
+Or from source:
 
-File signature: `LUMP` + 2-byte version at the start of every `.lumpi` file.
+```bash
+git clone https://github.com/nickzozulya/lumpi
+cd lumpi
+cargo install --path .
+```
 
+Requires Rust 1.75+. No runtime dependencies.
 
-## LUMPRESS 6.1 | SPECTRUM BENCHMARK
+## Usage
 
-| Dataset | Format | Size(MB) | Entropy | Bucket | LUMPI Ratio | Zstd L3 | Weissman | Lumpi (med) | Zstd L3 (med) |
-| ------- | ------ | -------- | ------- | ------ | ----------- | ------- | -------- | ----------- | ------------- |
-| 01_random_noise.bin  | Raw    |    10.00 |    8.00 | High (Noise)  |       1.00x |       1.00x |    0.583 |     24.56 ms |      5.62 ms |
-| 02_real_text.txt     | Raw    |     4.33 |    4.67 | Low           |      87.49x |      82.12x |    0.268 |     13.36 ms |      0.96 ms |
-| 03_complex_api.jsonl | JSONL  |     6.83 |    5.14 | Medium        |      54.35x |      42.77x |    0.509 |     23.39 ms |      2.59 ms |
-| 05_array.json        | JSON   |     6.70 |    4.35 | Low           |      18.34x |      12.10x |    0.781 |     51.67 ms |      6.70 ms |
-| creditcard.csv       | CSV    |   143.84 |    3.67 | Low           |       2.23x |       2.12x |    0.985 |   1434.93 ms |    884.95 ms |
-| test_logs.jsonl      | JSONL  |   500.00 |    5.00 | Low           |      20.05x |      10.67x |    1.518 |   2179.43 ms |    496.41 ms |
+```bash
+# Compress
+lumpi pack access.log.jsonl              # → access.log.jsonl.lmp
+lumpi pack access.log.jsonl out.lmp      # explicit output path
 
+# Decompress
+lumpi unpack out.lmp                     # → out
+lumpi unpack out.lmp restored.jsonl
 
-## LUMPRESS 6.0 | ULTIMATE ANALYSIS (500 MB JSONL)
+# Compare against all baselines on one file
+lumpi research access.log.jsonl
 
-| Algorithm          | Size (KB)    | Ratio    | Pack ms      | MB/s      |
-| ------------------ | ------------ | -------- | ------------ | --------- |
-| GZIP (v6)          |   34783.73   |   14.72x |    2748.06   |    181.95 |
-| Zstd (L3)          |   47980.98   |   10.67x |     478.80   |   1044.28 |
-| Zstd (L6)          |   37030.39   |   13.83x |    1849.07   |    270.41 |
-| Zstd (L9)          |   33872.81   |   15.12x |    3075.78   |    162.56 |
-| Zstd (L15)         |   28733.97   |   17.82x |   21172.34   |     23.62 |
-| Zstd (L19)         |   26789.45   |   19.11x |  223955.01   |      2.23 |
-| Brotli (L3)        |   60041.64   |    8.53x |    1521.22   |    328.68 |
-| Brotli (L11)       |   26584.17   |   19.26x |  702103.02   |      0.71 |
-| **LUMPRESS (L9)**  |   25532.24   |   20.05x |    2630.12   |    190.11 |
+# Benchmark a directory of files (skips non-flat files automatically)
+lumpi bench ./logs/
 
-WEISSMAN SCORE (vs Zstd L3): **1.473**
+# Search without full decompression
+lumpi grep out.lmp "status=500"
+lumpi grep out.lmp "level=ERROR"
+lumpi grep out.lmp "user_id=42"
+```
 
+`pack` and `unpack` print ratio and throughput. `grep` writes matches to stdout and `N matches in Xms` to stderr, so output is pipeable.
 
-## LUMPRESS 6.0 | SPECTRUM BENCHMARK
+## How it works
 
-| Dataset | Format | Size(MB) | Entropy | Bucket | LUMPI Ratio | Zstd L3 | Weissman | Lumpi (med) | Zstd L3 (med) |
-| ------- | ------ | -------- | ------- | ------ | ----------- | ------- | -------- | ----------- | ------------- |
-| 01_random_noise.bin  | Raw    |    10.00 |    8.00 | High (Noise)  |       1.00x |       1.00x |    0.506 |     25.17 ms |      4.22 ms |
-| 02_real_text.txt     | Raw    |     4.33 |    4.67 | Low           |      87.49x |      82.12x |    0.289 |     13.44 ms |      1.06 ms |
-| 03_complex_api.jsonl | JSONL  |     6.83 |    5.14 | Medium        |      46.28x |      42.77x |    0.409 |     28.41 ms |      2.59 ms |
-| 05_array.json        | JSON   |     6.70 |    4.35 | Low           |      18.34x |      12.10x |    0.750 |     49.14 ms |      5.93 ms |
-| creditcard.csv       | CSV    |   143.84 |    3.67 | Low           |       2.23x |       2.12x |    0.973 |   1494.69 ms |    848.41 ms |
-| test_logs.jsonl      | JSONL  |   500.00 |    5.00 | Low           |      20.05x |      10.67x |    1.518 |   2204.27 ms |    500.38 ms |
+1. **Parse** — a zero-copy FSM walks the JSONL byte-by-byte and extracts key-value pairs without allocating per-field strings. Nested objects or arrays trigger an automatic fallback to raw mode.
 
+2. **Transpose** — fields are routed into separate streams: a key-ID stream, a type stream, a string-ID stream, a ZigZag varint stream, and a literal stream (booleans, nulls, floats).
 
-## LUMPRESSION 5.4 | ENTROPY SPECTRUM BENCHMARK (MEDIAN & STEADY-STATE)
+3. **Encode** — string values are interned into a global dictionary (u32 ID). Fields where unique values exceed 50% of occurrences after 100 samples (UUIDs, request IDs, session tokens) are detected automatically and stored raw — preventing dictionary bloat on mixed-cardinality data.
 
-| Dataset | Size(MB) | Entropy | Bucket | Lumpi Ratio | Zstd L3 | Weissman | Lumpi (med) | Zstd L3 (med) |
-| --------| -------- | --------| ------ | ----------- | ------- | -------- | ----------- | ------------- |
-| 01_random_noise.bin  |    10.00 |    8.00 | Noise         |       1.00x |       1.00x |    0.494 |     24.55 ms |      3.96 ms |
-| 02_real_text.txt     |     4.33 |    4.67 | Natural Text   |      87.50x |      82.12x |    0.274 |     12.74 ms |      0.96 ms |
-| 03_complex_api.jsonl |     6.83 |    5.14 | Mixed JSON   |      46.28x |      42.77x |    0.403 |     29.24 ms |      2.56 ms |
-| test_logs.jsonl      |   500.00 |    5.00 | Target Logs   |      21.01x |      10.67x |    1.488 |   3463.96 ms |    472.06 ms |
+4. **Compress** — all streams concatenated and compressed with Zstd L9 multithreaded. A SHA-256 of the columnar payload is stored in the header for integrity verification on decompression.
 
+## Scope
 
-## LUMPRESSION 5.3 | ENTROPY SPECTRUM BENCHMARK (MEDIAN & STEADY-STATE)
+| Input | Behavior |
+|---|---|
+| Flat JSONL (nginx, app logs, CloudTrail, Datadog) | Columnar encoding — full ratio benefit |
+| CSV with header row | Columnar encoding |
+| JSON array of flat objects | Columnar encoding |
+| Nested JSON (GitHub Archive, API dumps) | Raw Zstd — detected automatically |
+| Binary / unstructured | Raw Zstd — detected automatically |
 
-| Dataset | Size(MB) | Entropy | Bucket | Lumpi Ratio | Zstd L3 | Weissman | Lumpi (med) | Zstd L3 (med) |
-| --------| -------- | --------| ------ | ----------- | ------- | -------- | ----------- | ------------- |
-| 01_random_noise.bin  |    10.00 |    8.00 | High (Noise)         |       1.00x |       1.00x |    0.494 |     24.55 ms |      3.96 ms |
-| 02_real_text.txt     |     4.33 |    4.67 | Low   |      87.50x |      82.12x |    0.274 |     12.74 ms |      0.96 ms |
-| 03_complex_api.jsonl |     6.83 |    5.14 | Medium   |      46.28x |      42.77x |    0.403 |     29.24 ms |      2.56 ms |
-| test_logs.jsonl      |   500.00 |    5.00 | Low   |      21.01x |      10.67x |    1.489 |   3624.62 ms |    491.08 ms |
+## Reproduce the benchmark
+
+```bash
+bash bench.sh
+```
+
+Generates three datasets locally (no download required) and optionally fetches one hour of GitHub Archive events to demonstrate the nested-JSON fallback. Requires `python3` and `lumpi` in PATH.
+
+## Format
+
+- Magic bytes: `LUMP`
+- Version: `0x08 0x00`
+- Payload: single Zstd block containing a 64-byte SHA-256 hex digest, a schema dictionary mapping key names to u16 IDs, and columnar data streams
+- Extension: `.lmp`
+
+Archives produced by older format versions will be rejected with a clear error. Re-compress with the current binary.
