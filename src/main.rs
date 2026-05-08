@@ -8,7 +8,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 
 #[derive(Parser)]
-#[command(name = "lumpi", version = "9.0.0", about = "Columnar compression for flat JSONL and CSV logs")]
+#[command(name = "lumpi", version, about = "Columnar compression for flat JSONL and CSV logs")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
