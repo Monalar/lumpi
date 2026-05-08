@@ -126,6 +126,7 @@ fn calc_throughput(mb: f64, ms: f64) -> f64 {
 }
 
 fn main() {
+    eprintln!("mnlr \u{22c5} lumpi");
     let cli = Cli::parse();
     match &cli.command {
         Commands::Pack { input, output } => {
