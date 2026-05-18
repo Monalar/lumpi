@@ -32,6 +32,12 @@ The last row is the skeptic's test: `requestID` is a UUID field that exceeds the
 ## Install
 
 ```bash
+brew install Monalar/tap/lumpi
+```
+
+Or with Cargo:
+
+```bash
 cargo install lumpi
 ```
 
@@ -43,7 +49,7 @@ cd lumpi
 cargo install --path .
 ```
 
-Requires Rust stable. No runtime dependencies.
+Cargo requires Rust stable. No runtime dependencies.
 
 ## Usage
 
