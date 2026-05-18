@@ -126,7 +126,10 @@ fn calc_throughput(mb: f64, ms: f64) -> f64 {
 }
 
 fn main() {
-    eprintln!("mnlr \u{22c5} lumpi");
+    use std::io::IsTerminal;
+    if std::io::stderr().is_terminal() {
+        eprintln!("mnlr \u{22c5} lumpi");
+    }
     let cli = Cli::parse();
     match &cli.command {
         Commands::Pack { input, output } => {

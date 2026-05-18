@@ -1,0 +1,55 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-aarch64-apple-darwin:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add target
+        run: rustup target add aarch64-apple-darwin
+      - name: Build
+        run: cargo build --release --target aarch64-apple-darwin
+      - name: Package
+        run: tar czf lumpi-aarch64-apple-darwin.tar.gz -C target/aarch64-apple-darwin/release lumpi
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: lumpi-aarch64-apple-darwin.tar.gz
+
+  build-x86_64-apple-darwin:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add target
+        run: rustup target add x86_64-apple-darwin
+      - name: Build
+        run: cargo build --release --target x86_64-apple-darwin
+      - name: Package
+        run: tar czf lumpi-x86_64-apple-darwin.tar.gz -C target/x86_64-apple-darwin/release lumpi
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: lumpi-x86_64-apple-darwin.tar.gz
+
+  build-x86_64-unknown-linux-gnu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add target
+        run: rustup target add x86_64-unknown-linux-gnu
+      - name: Build
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+      - name: Package
+        run: tar czf lumpi-x86_64-unknown-linux-gnu.tar.gz -C target/x86_64-unknown-linux-gnu/release lumpi
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: lumpi-x86_64-unknown-linux-gnu.tar.gz

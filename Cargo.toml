@@ -1,6 +1,6 @@
 [package]
 name = "lumpi"
-version = "9.0.3"
+version = "9.0.4"
 edition = "2021"
 description = "Columnar compression for flat JSONL and CSV logs — Zstd-19 ratio at 100x the speed, greps 3-10x faster than raw text"
 license = "Apache-2.0"
