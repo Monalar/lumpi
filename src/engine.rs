@@ -882,6 +882,153 @@ fn parse_scan_offsets(scan_raw: &[u8]) -> (usize, usize, usize, usize, usize, us
     (total_fields, string_count, key_ids_off, types_off, sids_off, fpr_off)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encode_then_decode(n: i64) -> i64 {
+        let mut buf = Vec::new();
+        encode_zigzag_varint(n, &mut buf);
+        let mut cursor = 0;
+        decode_zigzag_varint(&buf, &mut cursor)
+    }
+
+    #[test]
+    fn varint_zigzag_roundtrip() {
+        for &n in &[0i64, 1, -1, 127, -128, 300, -300, i64::MAX / 2, i64::MIN / 2] {
+            assert_eq!(encode_then_decode(n), n, "failed for {}", n);
+        }
+    }
+
+    #[test]
+    fn varint_zigzag_encoding_parity() {
+        let mut buf = Vec::new();
+        encode_zigzag_varint(0, &mut buf);
+        assert_eq!(buf, &[0]);
+        buf.clear();
+        encode_zigzag_varint(-1, &mut buf);
+        assert_eq!(buf, &[1]);
+        buf.clear();
+        encode_zigzag_varint(1, &mut buf);
+        assert_eq!(buf, &[2]);
+    }
+
+    #[test]
+    fn cardinality_detection() {
+        let mut engine = LumpiEngine::new();
+        let jsonl: String = (0..200)
+            .map(|i| format!("{{\"id\": \"{}\", \"level\": \"INFO\"}}\n", i))
+            .collect();
+        let (_, _) = engine.compress_buffer(jsonl.as_bytes()).unwrap();
+        let id_key = *engine.schema_dict.get(b"id".as_ref()).unwrap();
+        assert!(engine.high_card_keys.contains(&id_key), "id should be high-cardinality");
+        let level_key = *engine.schema_dict.get(b"level".as_ref()).unwrap();
+        assert!(!engine.high_card_keys.contains(&level_key), "level should be low-cardinality");
+    }
+
+    #[test]
+    fn csv_quoted_fields() {
+        let csv = b"name,value\n\"hello, world\",42\n\"foo\",7\n";
+        let mut engine = LumpiEngine::new();
+        let (compressed, _) = engine.compress_buffer(csv).unwrap();
+        let decompressed = LumpiEngine::decompress_buffer(&compressed).unwrap();
+        let text = std::str::from_utf8(&decompressed).unwrap();
+        assert!(text.contains("hello, world"), "quoted field with comma should survive: {}", text);
+        assert!(text.contains("42"), "numeric field should survive: {}", text);
+    }
+
+    #[test]
+    fn jsonl_roundtrip_semantic() {
+        let input = b"{\"level\": \"ERROR\", \"status\": 500}\n{\"level\": \"INFO\", \"status\": 200}\n";
+        let mut engine = LumpiEngine::new();
+        let (compressed, _) = engine.compress_buffer(input).unwrap();
+        let decompressed = LumpiEngine::decompress_buffer(&compressed).unwrap();
+        let text = std::str::from_utf8(&decompressed).unwrap();
+        let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("\"level\": \"ERROR\""), "first row level: {}", lines[0]);
+        assert!(lines[0].contains("\"status\": 500"), "first row status: {}", lines[0]);
+        assert!(lines[1].contains("\"level\": \"INFO\""), "second row level: {}", lines[1]);
+    }
+
+    #[test]
+    fn csv_roundtrip_produces_jsonl() {
+        let csv = b"host,port,status\nlocalhost,8080,200\nexample.com,443,301\n";
+        let mut engine = LumpiEngine::new();
+        let (compressed, _) = engine.compress_buffer(csv).unwrap();
+        let decompressed = LumpiEngine::decompress_buffer(&compressed).unwrap();
+        let text = std::str::from_utf8(&decompressed).unwrap();
+        assert!(text.contains("localhost"), "host value: {}", text);
+        assert!(text.contains("8080"), "port value: {}", text);
+        assert!(text.contains("200"), "status value: {}", text);
+        for line in text.lines().filter(|l| !l.is_empty()) {
+            assert!(line.starts_with('{') && line.ends_with('}'), "should be JSON object: {}", line);
+        }
+    }
+
+    #[test]
+    fn grep_finds_correct_rows() {
+        let input: String = (0..50)
+            .map(|i| {
+                let level = if i % 5 == 0 { "ERROR" } else { "INFO" };
+                format!("{{\"level\": \"{}\", \"i\": {}}}\n", level, i)
+            })
+            .collect();
+        let mut engine = LumpiEngine::new();
+        let (compressed, _) = engine.compress_buffer(input.as_bytes()).unwrap();
+        let matches = LumpiEngine::grep_buffer(&compressed, b"level", b"ERROR").unwrap();
+        assert_eq!(matches.len(), 10, "expected 10 ERROR rows (i=0,5,10,...,45)");
+        for m in &matches {
+            let s = std::str::from_utf8(m).unwrap();
+            assert!(s.contains("\"level\": \"ERROR\""), "match should contain ERROR: {}", s);
+        }
+    }
+
+    #[test]
+    fn grep_no_match_returns_empty() {
+        let input = b"{\"level\": \"INFO\"}\n{\"level\": \"WARN\"}\n";
+        let mut engine = LumpiEngine::new();
+        let (compressed, _) = engine.compress_buffer(input).unwrap();
+        let matches = LumpiEngine::grep_buffer(&compressed, b"level", b"ERROR").unwrap();
+        assert_eq!(matches.len(), 0);
+    }
+
+    #[test]
+    fn nested_json_raw_fallback_is_exact() {
+        let input = b"{\"nested\": {\"a\": 1}}\n{\"nested\": {\"b\": 2}}\n";
+        let mut engine = LumpiEngine::new();
+        let (compressed, _) = engine.compress_buffer(input).unwrap();
+        assert!(!engine.was_structured(), "nested JSON should fall back to raw");
+        let decompressed = LumpiEngine::decompress_buffer(&compressed).unwrap();
+        assert_eq!(decompressed, input, "raw fallback must be byte-exact");
+    }
+
+    #[test]
+    fn raw_fallback_sha256_integrity() {
+        let input = b"not json at all, just raw bytes 12345\n";
+        let mut engine = LumpiEngine::new();
+        let (mut compressed, _) = engine.compress_buffer(input).unwrap();
+        let result_ok = LumpiEngine::decompress_buffer(&compressed);
+        assert!(result_ok.is_ok());
+        compressed[10] ^= 0xFF;
+        let result_err = LumpiEngine::decompress_buffer(&compressed);
+        assert!(result_err.is_err(), "corrupted data should fail integrity check");
+    }
+
+    #[test]
+    fn invalid_magic_rejected() {
+        let bad = b"NOPE\x09\x00\xFF\xFF\xFF\xFF";
+        let result = LumpiEngine::decompress_buffer(bad);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn empty_file_too_small_rejected() {
+        let result = LumpiEngine::decompress_buffer(b"LU");
+        assert!(result.is_err());
+    }
+}
+
 fn frame_has_string_match(
     scan_raw: &[u8], total_fields: usize,
     key_ids_off: usize, types_off: usize, sids_off: usize,
