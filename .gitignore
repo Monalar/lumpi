@@ -1,5 +1,6 @@
 /target
 restored.jsonl
+.DS_Store
 *.lmpi
 /target/
 *.py
