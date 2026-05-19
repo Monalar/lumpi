@@ -14,10 +14,10 @@ Benchmarked against `zstdgrep` (`zstd -d | grep`, L19-compressed baseline) and p
 
 | Query | matches | lumpi ms | zstdgrep ms | grep ms |
 |---|---|---|---|---|
-| App logs — `level=ERROR` | 99 734 | **128** | 447 | 426 |
-| Nginx — `method=DELETE` | 71 571 | **146** | 831 | 805 |
-| CloudTrail — `eventName=CreateRole` | 19 948 | **68** | 268 | 246 |
-| CloudTrail — `requestID=<uuid>` (not in dictionary) | 1 | **56** | 312 | 291 |
+| App logs — `level=ERROR` | 99 946 | **133** | 461 | 449 |
+| Nginx — `method=DELETE` | 71 343 | **153** | 854 | 839 |
+| CloudTrail — `eventName=CreateRole` | 20 051 | **67** | 271 | 261 |
+| CloudTrail — `requestID=<uuid>` (not in dictionary) | 1 | **56** | 444 | 424 |
 
 The UUID row is the skeptic's test: `requestID` exceeds the cardinality threshold and is stored raw, bypassing the dictionary entirely. Lumpi still wins because the frame layout limits how much data it reads from disk, regardless of how the field is encoded.
 
@@ -29,9 +29,9 @@ Numbers from `bash bench.sh`, Apple M3, 11 threads.
 
 | Dataset | Size | Lumpi ratio | Zstd L9 MT ratio | Zstd L19+LDM ratio | Lumpi MB/s | Zstd L9 MT MB/s |
 |---|---|---|---|---|---|---|
-| App logs (level, user\_id, path, status) | 53 MB | **12.99×** | 10.56× | 13.04× | 239 | 388 |
-| CloudTrail (UUID request IDs) | 68 MB | **10.00×** | 8.44× | 10.11× | 204 | 482 |
-| Nginx access logs | 111 MB | **15.68×** | 10.63× | 13.01× | 225 | 561 |
+| App logs (level, user\_id, path, status) | 53 MB | **12.99×** | 10.56× | 13.04× | 232 | 372 |
+| CloudTrail (UUID request IDs) | 68 MB | **10.04×** | 8.44× | 10.11× | 189 | 420 |
+| Nginx access logs | 111 MB | **15.69×** | 10.63× | 13.01× | 227 | 536 |
 
 Zstd L19+LDM throughput: ~2 MB/s (single-threaded, same machine). Run `lumpi research <file>` for a full per-file breakdown including Brotli and Gzip.
 
@@ -43,7 +43,7 @@ Lumpi is a **canonical archive format for logs**, not a byte-exact compressor. `
 - Integer normalization: integers parsed from strings round-trip as integers
 - Whitespace is not preserved
 - CSV input unpacks as JSONL (one JSON object per row, column names as keys)
-- `null` values are not currently preserved (the field is omitted)
+- `null` values are preserved as JSON `null` literals
 
 If you need byte-exact storage, lumpi automatically falls back to raw Zstd for files it cannot parse as flat JSONL or CSV. That path is byte-exact and verified with SHA-256 on unpack.
 

@@ -83,12 +83,14 @@ fn median(mut times: Vec<f64>) -> f64 {
 }
 
 fn run_zstd_pack(content: &[u8], level: i32, iterations: usize) -> (f64, f64, Vec<u8>) {
-    let final_compressed = zstd::encode_all(content, level).unwrap();
+    let final_compressed = zstd::encode_all(content, level)
+        .unwrap_or_else(|e| die(format!("zstd compress L{}: {}", level, e)));
     let final_size = final_compressed.len() as f64;
     let mut times = Vec::with_capacity(iterations);
     for _ in 0..iterations {
         let start = Instant::now();
-        let _ = zstd::encode_all(content, level).unwrap();
+        let _ = zstd::encode_all(content, level)
+            .unwrap_or_else(|e| die(format!("zstd compress L{}: {}", level, e)));
         times.push(start.elapsed().as_secs_f64() * 1000.0);
     }
     (final_size, median(times), final_compressed)
@@ -97,10 +99,14 @@ fn run_zstd_pack(content: &[u8], level: i32, iterations: usize) -> (f64, f64, Ve
 fn run_zstd_mt_pack(content: &[u8], level: i32, threads: u32, iterations: usize) -> (f64, f64) {
     let compress_once = |buf: &mut Vec<u8>| {
         buf.clear();
-        let mut enc = zstd::stream::Encoder::new(buf, level).unwrap();
-        enc.multithread(threads).unwrap();
-        enc.write_all(content).unwrap();
-        enc.finish().unwrap();
+        let mut enc = zstd::stream::Encoder::new(buf, level)
+            .unwrap_or_else(|e| die(format!("zstd MT encoder L{}: {}", level, e)));
+        enc.multithread(threads)
+            .unwrap_or_else(|e| die(format!("zstd MT threads: {}", e)));
+        enc.write_all(content)
+            .unwrap_or_else(|e| die(format!("zstd MT write: {}", e)));
+        enc.finish()
+            .unwrap_or_else(|e| die(format!("zstd MT finish: {}", e)));
     };
     let mut buf = Vec::new();
     compress_once(&mut buf);
@@ -117,11 +123,16 @@ fn run_zstd_mt_pack(content: &[u8], level: i32, threads: u32, iterations: usize)
 fn run_zstd_long_pack(content: &[u8], level: i32, iterations: usize) -> (f64, f64) {
     let compress_once = |buf: &mut Vec<u8>| {
         buf.clear();
-        let mut enc = zstd::stream::Encoder::new(buf, level).unwrap();
-        enc.long_distance_matching(true).unwrap();
-        enc.window_log(27).unwrap();
-        enc.write_all(content).unwrap();
-        enc.finish().unwrap();
+        let mut enc = zstd::stream::Encoder::new(buf, level)
+            .unwrap_or_else(|e| die(format!("zstd LDM encoder L{}: {}", level, e)));
+        enc.long_distance_matching(true)
+            .unwrap_or_else(|e| die(format!("zstd LDM enable: {}", e)));
+        enc.window_log(27)
+            .unwrap_or_else(|e| die(format!("zstd LDM window_log: {}", e)));
+        enc.write_all(content)
+            .unwrap_or_else(|e| die(format!("zstd LDM write: {}", e)));
+        enc.finish()
+            .unwrap_or_else(|e| die(format!("zstd LDM finish: {}", e)));
     };
     let mut buf = Vec::new();
     compress_once(&mut buf);
@@ -142,8 +153,10 @@ fn run_brotli_pack(content: &[u8], level: u32, iterations: usize) -> (f64, f64) 
         let start = Instant::now();
         let mut compressed = Vec::new();
         let mut writer = brotli::CompressorWriter::new(&mut compressed, 4096, level, 22);
-        writer.write_all(content).unwrap();
-        writer.flush().unwrap();
+        writer.write_all(content)
+            .unwrap_or_else(|e| die(format!("brotli write L{}: {}", level, e)));
+        writer.flush()
+            .unwrap_or_else(|e| die(format!("brotli flush L{}: {}", level, e)));
         drop(writer);
         if i == 0 { final_size = compressed.len() as f64; }
         times.push(start.elapsed().as_secs_f64() * 1000.0);
@@ -157,8 +170,10 @@ fn run_gzip_pack(content: &[u8], iterations: usize) -> (f64, f64) {
     for i in 0..iterations {
         let start = Instant::now();
         let mut gz_enc = GzEncoder::new(Vec::new(), Compression::default());
-        gz_enc.write_all(content).unwrap();
-        let compressed = gz_enc.finish().unwrap();
+        gz_enc.write_all(content)
+            .unwrap_or_else(|e| die(format!("gzip write: {}", e)));
+        let compressed = gz_enc.finish()
+            .unwrap_or_else(|e| die(format!("gzip finish: {}", e)));
         if i == 0 { final_size = compressed.len() as f64; }
         times.push(start.elapsed().as_secs_f64() * 1000.0);
     }
