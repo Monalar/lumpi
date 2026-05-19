@@ -10,7 +10,7 @@ Flat JSONL logs repeat keys and enum values millions of times. Lumpi transposes 
 
 `lumpi grep` scans the compressed archive directly. Each 65 536-row frame stores a small scan block (key IDs, types, dictionary IDs) separately from the data block. Grep decompresses only the scan block and skips the data block when the target field is absent — typically reading less than 10% of the file.
 
-Benchmarked against `zstdgrep` (`zstd -d | grep`, L19-compressed baseline) and plain `grep` on raw text. Warm cache, Apple M3.
+Benchmarked against `zstdgrep` (`zstd -d | grep`, L19-compressed baseline) and plain `grep` on raw text. Warm cache, Apple M3 Pro.
 
 | Query | matches | lumpi ms | zstdgrep ms | grep ms |
 |---|---|---|---|---|
