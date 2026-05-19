@@ -135,12 +135,17 @@ with open('$BENCH_DIR/cloudtrail_logs.jsonl') as f:
 ")
 
 python3 - "$BENCH_DIR" "$CT_UUID" <<'PY'
-import subprocess, time, sys, os
+import subprocess, time, sys, re
 
 bench_dir = sys.argv[1]
 ct_uuid   = sys.argv[2]
 
 LUMPI = "lumpi"
+
+def grep_matches(lmp, pattern):
+    r = subprocess.run([LUMPI, "grep", lmp, pattern], capture_output=True)
+    m = re.search(rb'(\d+) matches', r.stderr)
+    return m.group(1).decode() if m else '?'
 
 def ms(cmd, n=3):
     times = []
@@ -165,15 +170,14 @@ rows = [
      f"{bench_dir}/cloudtrail_logs.lmp", f"{bench_dir}/cloudtrail_logs.jsonl.zst", f"{bench_dir}/cloudtrail_logs.jsonl"),
 ]
 
-print(f"\n{'Query':<30} | {'matches':>8} | {'lumpi ms':>9} | {'zstdgrep ms':>11} | {'grep ms':>8}")
-print("-" * 80)
+print(f"\n{'Query':<36} | {'matches':>8} | {'lumpi ms':>9} | {'zstdgrep ms':>11} | {'grep ms':>8}")
+print("-" * 86)
 for label, lp, gp, lmp, zst, jsonl in rows:
-    r = subprocess.run([LUMPI, "grep", lmp, lp], capture_output=True)
-    matches = r.stderr.decode().split()[0]
+    matches = grep_matches(lmp, lp)
     lms  = ms([LUMPI, "grep", lmp, lp])
     zms  = ms(zstdgrep_cmd(zst, gp))
     gms  = ms(["grep", gp, jsonl])
-    print(f"{label + ' — ' + lp:<30} | {matches:>8} | {lms:>9.0f} | {zms:>11.0f} | {gms:>8.0f}")
+    print(f"{label + ' — ' + lp:<36} | {matches:>8} | {lms:>9.0f} | {zms:>11.0f} | {gms:>8.0f}")
 PY
 
 # --- Optional: GitHub Archive (nested JSON, raw fallback demo) ---
@@ -195,6 +199,21 @@ if command -v curl &>/dev/null; then
     fi
 else
     echo "curl not found — skipping GitHub Archive demo."
+fi
+
+echo ""
+echo "$SEP"
+echo "  ROUND-TRIP CHECK"
+echo "$SEP"
+UNPACKED="$BENCH_DIR/app_logs_unpacked.jsonl"
+lumpi unpack "$BENCH_DIR/app_logs.lmp" "$UNPACKED" 2>/dev/null
+ORIG_LINES=$(wc -l < "$BENCH_DIR/app_logs.jsonl" | tr -d ' ')
+UNPACK_LINES=$(wc -l < "$UNPACKED" | tr -d ' ')
+echo "app_logs: $ORIG_LINES rows original → $UNPACK_LINES rows after pack/unpack"
+if [ "$ORIG_LINES" -eq "$UNPACK_LINES" ]; then
+    echo "Row count matches. (Formatting differs — lumpi is not byte-exact, see README.)"
+else
+    echo "WARNING: row count mismatch — expected $ORIG_LINES, got $UNPACK_LINES"
 fi
 
 echo ""
