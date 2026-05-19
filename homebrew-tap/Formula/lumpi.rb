@@ -1,7 +1,7 @@
 class Lumpi < Formula
   desc "Columnar compression for flat JSONL and CSV logs"
   homepage "https://github.com/Monalar/lumpi"
-  version "1.0.0"
+  version "9.0.5"
   license "Apache-2.0"
 
   on_macos do

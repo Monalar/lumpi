@@ -1,6 +1,6 @@
 # Lumpi
 
-Search compressed log archives without decompressing them. Pack flat JSONL and CSV logs into `.lmp` files, then `grep` directly against the archive — faster than grepping the raw text.
+Search compressed log archives without decompressing them. Pack flat JSONL and CSV logs into `.lmp` files, then `grep` directly against the archive — faster than grepping the raw text, and often faster than grepping an uncompressed file.
 
 ## The problem
 
@@ -10,37 +10,37 @@ Flat JSONL logs repeat keys and enum values millions of times. Lumpi transposes 
 
 `lumpi grep` scans the compressed archive directly. Each 65 536-row frame stores a small scan block (key IDs, types, dictionary IDs) separately from the data block. Grep decompresses only the scan block and skips the data block when the target field is absent — typically reading less than 10% of the file.
 
-Benchmarked against `zstdgrep` (`zstd -d | grep`) and plain `grep` on the raw file, warm cache, Apple M3. Numbers below are from the last `bash bench.sh` run; regenerate with that command.
+Benchmarked against `zstdgrep` (`zstd -d | grep`, L19-compressed baseline) and plain `grep` on raw text. Warm cache, Apple M3.
 
-| Query | lumpi ms | zstdgrep ms | grep ms |
-|---|---|---|---|
-| App logs — `level=ERROR` | _run bench.sh_ | | |
-| Nginx — `method=DELETE` | | | |
-| CloudTrail — `eventName=CreateRole` | | | |
-| CloudTrail — `requestID=<uuid>` (not in dictionary) | | | |
+| Query | matches | lumpi ms | zstdgrep ms | grep ms |
+|---|---|---|---|---|
+| App logs — `level=ERROR` | 99 734 | **128** | 447 | 426 |
+| Nginx — `method=DELETE` | 71 571 | **146** | 831 | 805 |
+| CloudTrail — `eventName=CreateRole` | 19 948 | **68** | 268 | 246 |
+| CloudTrail — `requestID=<uuid>` (not in dictionary) | 1 | **56** | 312 | 291 |
 
-The UUID row is the skeptic's test: `requestID` exceeds the cardinality threshold and is stored raw, bypassing the dictionary entirely. Lumpi still wins because the frame layout limits how much data it reads from disk — regardless of how the field is encoded.
+The UUID row is the skeptic's test: `requestID` exceeds the cardinality threshold and is stored raw, bypassing the dictionary entirely. Lumpi still wins because the frame layout limits how much data it reads from disk, regardless of how the field is encoded.
 
 ## Compression
 
-Lumpi uses Zstd L9 multithreaded internally. The point of the columnar encoding is not to replace Zstd — it is to let a fast compressor (L9 MT) reach the ratio of a slow one (L19). The table below shows all three: lumpi, the plain Zstd L9 MT baseline it is built on, and Zstd L19+LDM as the upper bound.
+**The thesis:** columnar transposition lets Zstd L9 multithreaded reach Zstd L19+LDM compression ratios — while being ~110× faster. On app logs (53 MB, Apple M3, 11 threads): lumpi 232 MB/s vs Zstd L19+LDM 2.1 MB/s, with essentially equal ratio (12.99× vs 13.04×). On nginx access logs, columnar encoding exceeds L19+LDM by 20% (15.7× vs 13.0×). Plain Zstd L9 MT alone does not reach L19 — the columnar step is what closes the gap.
 
-Numbers below are placeholders — regenerate with `bash bench.sh`.
+Numbers from `bash bench.sh`, Apple M3, 11 threads.
 
 | Dataset | Size | Lumpi ratio | Zstd L9 MT ratio | Zstd L19+LDM ratio | Lumpi MB/s | Zstd L9 MT MB/s |
 |---|---|---|---|---|---|---|
-| Nginx access logs | _run bench.sh_ | | | | | |
-| App logs (level, user_id, path, status) | | | | | | |
-| CloudTrail (UUID request IDs) | | | | | | |
+| App logs (level, user\_id, path, status) | 53 MB | **12.99×** | 10.56× | 13.04× | 239 | 388 |
+| CloudTrail (UUID request IDs) | 68 MB | **10.00×** | 8.44× | 10.11× | 204 | 482 |
+| Nginx access logs | 111 MB | **15.68×** | 10.63× | 13.01× | 225 | 561 |
 
-Run `lumpi research <file>` for a full per-file breakdown including Brotli and GZIP.
+Zstd L19+LDM throughput: ~2 MB/s (single-threaded, same machine). Run `lumpi research <file>` for a full per-file breakdown including Brotli and Gzip.
 
 ## Round-trip semantics
 
 Lumpi is a **canonical archive format for logs**, not a byte-exact compressor. `pack → unpack` produces semantically equivalent records, not byte-identical output:
 
 - JSON formatting changes: keys are separated by `", "` and objects end with `\n`
-- Integer normalization: `1.0` stored as a float literal; integers parsed from strings round-trip as integers
+- Integer normalization: integers parsed from strings round-trip as integers
 - Whitespace is not preserved
 - CSV input unpacks as JSONL (one JSON object per row, column names as keys)
 - `null` values are not currently preserved (the field is omitted)
@@ -77,7 +77,7 @@ lumpi grep access.jsonl.lmp "method=DELETE"
 lumpi unpack access.jsonl.lmp
 ```
 
-`grep` writes matches to stdout and `N matches in Xms` to stderr, so output is pipeable.
+`grep` writes matches to stdout and `N matches in Xms` to stderr, so output is pipeable:
 
 ```bash
 lumpi grep access.jsonl.lmp "status=500" | jq .

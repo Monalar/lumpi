@@ -173,7 +173,7 @@ fn calc_throughput(mb: f64, ms: f64) -> f64 {
 fn main() {
     use std::io::IsTerminal;
     let sub = std::env::args().nth(1).unwrap_or_default();
-    if std::io::stderr().is_terminal() && sub != "bench" && sub != "grep" {
+    if std::io::stderr().is_terminal() && sub != "bench" && sub != "grep" && sub != "pack" {
         eprintln!("mnlr \u{22c5} lumpi");
     }
     let cli = Cli::parse();
