@@ -23,7 +23,7 @@ The UUID row is the skeptic's test: `requestID` exceeds the cardinality threshol
 
 ## Compression
 
-**The thesis:** columnar transposition lets Zstd L9 multithreaded reach Zstd L19+LDM compression ratios — while being ~110× faster. On app logs (53 MB, Apple M3, 11 threads): lumpi 232 MB/s vs Zstd L19+LDM 2.1 MB/s, with essentially equal ratio (12.99× vs 13.04×). On nginx access logs, columnar encoding exceeds L19+LDM by 20% (15.7× vs 13.0×). Plain Zstd L9 MT alone does not reach L19 — the columnar step is what closes the gap.
+Lumpi transposes JSONL/CSV logs into columns before compressing, so Zstd L9 reaches the compression ratio of single-threaded Zstd L19+LDM — on app logs 12.99× vs 13.04×, on nginx 15.7× vs 13.0×. Because L9 is multithreaded and L19+LDM is not, the throughput gap is large: on the 53 MB app-log set lumpi packs at ~230 MB/s vs ~2 MB/s for L19+LDM (Apple M3, single run — rerun bench.sh on your hardware). Plain Zstd L9 alone does not reach L19; the columnar step closes the gap.
 
 Numbers from `bash bench.sh`, Apple M3, 11 threads.
 
