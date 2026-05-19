@@ -14,24 +14,24 @@ Benchmarked against `zstdgrep` (`zstd -d | grep`, L19-compressed baseline) and p
 
 | Query | matches | lumpi ms | zstdgrep ms | grep ms |
 |---|---|---|---|---|
-| App logs — `level=ERROR` | 99 946 | **133** | 461 | 449 |
-| Nginx — `method=DELETE` | 71 343 | **153** | 854 | 839 |
-| CloudTrail — `eventName=CreateRole` | 20 051 | **67** | 271 | 261 |
-| CloudTrail — `requestID=<uuid>` (not in dictionary) | 1 | **56** | 444 | 424 |
+| App logs — `level=ERROR` | 100 139 | **150** | 478 | 443 |
+| Nginx — `method=DELETE` | 71 211 | **153** | 876 | 831 |
+| CloudTrail — `eventName=CreateRole` | 19 845 | **71** | 272 | 252 |
+| CloudTrail — `requestID=<uuid>` (not in dictionary) | 1 | **60** | 557 | 541 |
 
 The UUID row is the skeptic's test: `requestID` exceeds the cardinality threshold and is stored raw, bypassing the dictionary entirely. Lumpi still wins because the frame layout limits how much data it reads from disk, regardless of how the field is encoded.
 
 ## Compression
 
-Lumpi transposes JSONL/CSV logs into columns before compressing, so Zstd L9 reaches the compression ratio of single-threaded Zstd L19+LDM — on app logs 12.99× vs 13.04×, on nginx 15.7× vs 13.0×. Because L9 is multithreaded and L19+LDM is not, the throughput gap is large: on the 53 MB app-log set lumpi packs at ~230 MB/s vs ~2 MB/s for L19+LDM (Apple M3, single run — rerun bench.sh on your hardware). Plain Zstd L9 alone does not reach L19; the columnar step closes the gap.
+Lumpi transposes JSONL/CSV logs into columns before compressing, so Zstd L9 reaches the compression ratio of single-threaded Zstd L19+LDM — on app logs 12.99× vs 13.06×, on nginx 15.69× vs 13.01×. Because L9 is multithreaded and L19+LDM is not, the throughput gap is large: on the 53 MB app-log set lumpi packs at ~210 MB/s vs ~2 MB/s for L19+LDM (Apple M3, single run — rerun bench.sh on your hardware). Plain Zstd L9 alone does not reach L19; the columnar step closes the gap.
 
 Numbers from `bash bench.sh`, Apple M3, 11 threads.
 
 | Dataset | Size | Lumpi ratio | Zstd L9 MT ratio | Zstd L19+LDM ratio | Lumpi MB/s | Zstd L9 MT MB/s |
 |---|---|---|---|---|---|---|
-| App logs (level, user\_id, path, status) | 53 MB | **12.99×** | 10.56× | 13.04× | 232 | 372 |
-| CloudTrail (UUID request IDs) | 68 MB | **10.04×** | 8.44× | 10.11× | 189 | 420 |
-| Nginx access logs | 111 MB | **15.69×** | 10.63× | 13.01× | 227 | 536 |
+| App logs (level, user\_id, path, status) | 53 MB | **12.99×** | 10.56× | 13.06× | 214 | 301 |
+| CloudTrail (UUID request IDs) | 68 MB | **10.00×** | 8.44× | 10.11× | 193 | 432 |
+| Nginx access logs | 111 MB | **15.69×** | 10.63× | 13.01× | 225 | 497 |
 
 Zstd L19+LDM throughput: ~2 MB/s (single-threaded, same machine). Run `lumpi research <file>` for a full per-file breakdown including Brotli and Gzip.
 
