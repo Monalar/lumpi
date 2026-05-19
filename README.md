@@ -50,12 +50,6 @@ If you need byte-exact storage, lumpi automatically falls back to raw Zstd for f
 ## Install
 
 ```bash
-brew install Monalar/tap/lumpi
-```
-
-Or with Cargo:
-
-```bash
 cargo install lumpi
 ```
 
@@ -68,6 +62,8 @@ cargo install --path .
 ```
 
 Cargo requires Rust stable. No runtime dependencies.
+
+Homebrew (`brew install Monalar/tap/lumpi`) will be available after the first tagged release.
 
 ## Usage
 
