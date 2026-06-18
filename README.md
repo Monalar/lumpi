@@ -25,7 +25,7 @@ The UUID row is the skeptic's test: `requestID` exceeds the cardinality threshol
 
 Lumpi transposes JSONL/CSV logs into columns before compressing, so Zstd L9 reaches the compression ratio of single-threaded Zstd L19+LDM — on app logs 12.99× vs 13.06×, on nginx 15.69× vs 13.01×. Because L9 is multithreaded and L19+LDM is not, the throughput gap is large: on the 53 MB app-log set lumpi packs at ~210 MB/s vs ~2 MB/s for L19+LDM (Apple M3, single run — rerun bench.sh on your hardware). Plain Zstd L9 alone does not reach L19; the columnar step closes the gap.
 
-Numbers from `bash bench.sh`, Apple M3, 11 threads.
+Numbers from `bash bench.sh`, Apple M3 Pro, 11 threads.
 
 | Dataset | Size | Lumpi ratio | Zstd L9 MT ratio | Zstd L19+LDM ratio | Lumpi MB/s | Zstd L9 MT MB/s |
 |---|---|---|---|---|---|---|
