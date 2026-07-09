@@ -2,6 +2,8 @@
 
 Search compressed log archives without decompressing them. Pack flat JSONL and CSV logs into `.lmp` files, then `grep` directly against the archive — faster than grepping the raw text, and often faster than grepping an uncompressed file.
 
+<video src="assets/lumpi-animation.mp4" controls muted width="100%"></video>
+
 ## The problem
 
 Flat JSONL logs repeat keys and enum values millions of times. Lumpi transposes rows into columns, dictionary-encodes repeating values, then compresses with Zstd L9 (multithreaded). The compressor sees a much simpler signal, and the frame layout lets grep skip most of the data entirely.
