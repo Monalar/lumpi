@@ -2,7 +2,7 @@
 
 Search compressed log archives without decompressing them. Pack flat JSONL and CSV logs into `.lmp` files, then `grep` directly against the archive — faster than grepping the raw text, and often faster than grepping an uncompressed file.
 
-<video src="assets/lumpi-animation.mp4" controls muted width="100%"></video>
+[<video src="assets/lumpi-animation.mp4" controls muted width="100%"></video>](https://github.com/user-attachments/assets/0554cef6-db90-4787-b43e-1bc2ce7e5642)
 
 ## The problem
 
